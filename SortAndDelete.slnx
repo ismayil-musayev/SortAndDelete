@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/Core/">
+    <Project Path="Core/SortAndDelete.Core.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Tests/SortAndDelete.Tests.csproj" />
+  </Folder>
+  <Project Path="SortAndDelete.csproj" />
+</Solution>

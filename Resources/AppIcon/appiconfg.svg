@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg width="456" height="456" viewBox="0 0 456 456" version="1.1" xmlns="http://www.w3.org/2000/svg">
+    <!-- back card, fanned -->
+    <g transform="rotate(10 228 228)">
+        <rect x="152" y="126" width="160" height="200" rx="22" fill="#FFFFFF" opacity="0.35" />
+    </g>
+    <!-- front photo card -->
+    <g transform="rotate(-7 228 228)">
+        <rect x="140" y="118" width="168" height="210" rx="22" fill="#FFFFFF" />
+        <circle cx="190" cy="176" r="16" fill="#5B44D8" />
+        <path d="M152 300 L204 246 L238 280 L262 256 L296 292 L296 306 L152 306 Z" fill="#7C6CF0" />
+    </g>
+    <!-- sorted: green check badge -->
+    <circle cx="306" cy="316" r="46" fill="#2FB673" stroke="#FFFFFF" stroke-width="11" />
+    <path d="M285 316 l15 15 28 -28" stroke="#FFFFFF" stroke-width="13" fill="none"
+          stroke-linecap="round" stroke-linejoin="round" />
+</svg>

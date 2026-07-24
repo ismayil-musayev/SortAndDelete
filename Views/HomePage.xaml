@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="SortAndDelete.Views.HomePage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:vm="clr-namespace:SortAndDelete.ViewModels"
+    x:DataType="vm:HomeViewModel"
+    x:Name="Page"
+    Shell.NavBarIsVisible="False"
+    BackgroundColor="{StaticResource AppBackground}">
+
+    <Grid>
+
+        <!-- ===== No photo access ===== -->
+        <VerticalStackLayout
+            IsVisible="{Binding HasAccess, Converter={StaticResource InvertedBool}}"
+            VerticalOptions="Center" HorizontalOptions="Center"
+            Spacing="16" Padding="40">
+            <Label Text="🔒" FontSize="56" HorizontalOptions="Center" />
+            <Label Text="Photo access needed"
+                   FontSize="22" FontAttributes="Bold"
+                   TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+            <Label Text="Sort &amp; Delete reviews the photos on this device. Nothing ever leaves your phone."
+                   FontSize="15" TextColor="{StaticResource TextSecondary}"
+                   HorizontalTextAlignment="Center" />
+            <Button Text="Allow photo access"
+                    Command="{Binding GrantAccessCommand}"
+                    BackgroundColor="{StaticResource Accent}" TextColor="White"
+                    CornerRadius="14" HeightRequest="52" Margin="0,12,0,0" />
+        </VerticalStackLayout>
+
+        <!-- ===== Main content ===== -->
+        <RefreshView
+            IsVisible="{Binding HasAccess}"
+            Command="{Binding RefreshCommand}"
+            IsRefreshing="{Binding IsLoading}"
+            RefreshColor="{StaticResource Accent}"
+            BackgroundColor="{StaticResource AppBackground}">
+
+            <CollectionView ItemsSource="{Binding Months}" SelectionMode="None">
+
+                <CollectionView.Header>
+                    <VerticalStackLayout Padding="20,16,20,8" Spacing="16">
+
+                        <!-- Title row + bin button -->
+                        <Grid ColumnDefinitions="*,Auto">
+                            <VerticalStackLayout Spacing="2">
+                                <Label Text="Sort &amp; Delete"
+                                       FontSize="28" FontAttributes="Bold"
+                                       TextColor="{StaticResource TextPrimary}" />
+                                <Label Text="Sort your gallery, month by month"
+                                       FontSize="13" TextColor="{StaticResource TextSecondary}" />
+                            </VerticalStackLayout>
+                            <Button Grid.Column="1"
+                                    Text="{Binding BinBadgeText}"
+                                    Command="{Binding OpenBinCommand}"
+                                    BackgroundColor="{StaticResource SurfaceAlt}"
+                                    TextColor="{StaticResource TextPrimary}"
+                                    FontSize="14" CornerRadius="18"
+                                    Padding="16,0" HeightRequest="38"
+                                    VerticalOptions="Start" />
+                        </Grid>
+
+                        <!-- Stats chips -->
+                        <FlexLayout Wrap="Wrap" JustifyContent="Start" AlignItems="Center">
+                            <Border BackgroundColor="{StaticResource Surface}" StrokeThickness="0"
+                                    StrokeShape="RoundRectangle 14" Padding="12,7" Margin="0,0,8,8">
+                                <Label Text="{Binding TotalPhotosText}" FontSize="13"
+                                       TextColor="{StaticResource TextSecondary}" />
+                            </Border>
+                            <Border BackgroundColor="{StaticResource Surface}" StrokeThickness="0"
+                                    StrokeShape="RoundRectangle 14" Padding="12,7" Margin="0,0,8,8">
+                                <Label Text="{Binding ReviewedText}" FontSize="13"
+                                       TextColor="{StaticResource TextSecondary}" />
+                            </Border>
+                            <Border BackgroundColor="{StaticResource Surface}" StrokeThickness="0"
+                                    StrokeShape="RoundRectangle 14" Padding="12,7" Margin="0,0,8,8"
+                                    IsVisible="{Binding HasFreedSpace}">
+                                <Label Text="{Binding FreedText}" FontSize="13"
+                                       TextColor="{StaticResource KeepGreen}" />
+                            </Border>
+                            <Border BackgroundColor="{StaticResource Surface}" StrokeThickness="0"
+                                    StrokeShape="RoundRectangle 14" Padding="12,7" Margin="0,0,8,8"
+                                    IsVisible="{Binding HasStreak}">
+                                <Label Text="{Binding StreakText}" FontSize="13"
+                                       TextColor="{StaticResource WarnAmber}" />
+                            </Border>
+                        </FlexLayout>
+
+                        <!-- Continue where you left off -->
+                        <Border IsVisible="{Binding ContinueMonth, Converter={StaticResource IsNotNull}}"
+                                BackgroundColor="{StaticResource Accent}"
+                                StrokeThickness="0" StrokeShape="RoundRectangle 20"
+                                Padding="18,14">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Command="{Binding ContinueCommand}" />
+                            </Border.GestureRecognizers>
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                                <VerticalStackLayout Spacing="6">
+                                    <Label Text="Continue where you left off"
+                                           FontSize="13" TextColor="#D9D2FF" />
+                                    <Label Text="{Binding ContinueMonth.DisplayName}"
+                                           FontSize="19" FontAttributes="Bold" TextColor="White" />
+                                    <ProgressBar Progress="{Binding ContinueMonth.Progress}"
+                                                 ProgressColor="White" BackgroundColor="#5A4BC7" />
+                                </VerticalStackLayout>
+                                <Label Grid.Column="1" Text="▶" FontSize="22" TextColor="White"
+                                       VerticalOptions="Center" />
+                            </Grid>
+                        </Border>
+
+                        <!-- Biggest-files deck -->
+                        <Border BackgroundColor="{StaticResource Surface}"
+                                StrokeThickness="0" StrokeShape="RoundRectangle 16" Padding="14,12">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Command="{Binding OpenBiggestCommand}" />
+                            </Border.GestureRecognizers>
+                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="10">
+                                <Label Text="🐘" FontSize="20" VerticalOptions="Center" />
+                                <Label Grid.Column="1" Text="Biggest files first" FontSize="14"
+                                       TextColor="{StaticResource TextPrimary}" VerticalOptions="Center" />
+                                <Label Grid.Column="2" Text="›" FontSize="18"
+                                       TextColor="{StaticResource TextSecondary}" VerticalOptions="Center" />
+                            </Grid>
+                        </Border>
+
+                        <!-- Folder filter -->
+                        <Label Text="FOLDERS" FontSize="12" CharacterSpacing="1.4"
+                               TextColor="{StaticResource TextSecondary}" Margin="4,6,0,0" />
+                        <ScrollView Orientation="Horizontal" HorizontalScrollBarVisibility="Never">
+                            <HorizontalStackLayout Spacing="8" BindableLayout.ItemsSource="{Binding Folders}">
+                                <BindableLayout.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:FolderChip">
+                                        <Border StrokeThickness="0" StrokeShape="RoundRectangle 16" Padding="14,8">
+                                            <Border.GestureRecognizers>
+                                                <TapGestureRecognizer
+                                                    Command="{Binding BindingContext.SelectFolderCommand, Source={x:Reference Page}}"
+                                                    CommandParameter="{Binding .}" />
+                                            </Border.GestureRecognizers>
+                                            <Border.Triggers>
+                                                <DataTrigger TargetType="Border" Binding="{Binding IsSelected}" Value="True">
+                                                    <Setter Property="BackgroundColor" Value="{StaticResource Accent}" />
+                                                </DataTrigger>
+                                                <DataTrigger TargetType="Border" Binding="{Binding IsSelected}" Value="False">
+                                                    <Setter Property="BackgroundColor" Value="{StaticResource Surface}" />
+                                                </DataTrigger>
+                                            </Border.Triggers>
+                                            <Label Text="{Binding Label}" FontSize="13"
+                                                   TextColor="{StaticResource TextPrimary}" />
+                                        </Border>
+                                    </DataTemplate>
+                                </BindableLayout.ItemTemplate>
+                            </HorizontalStackLayout>
+                        </ScrollView>
+
+                        <Grid ColumnDefinitions="*,Auto,Auto" Margin="4,6,0,0" ColumnSpacing="14">
+                            <Label Text="MONTHS" FontSize="12" CharacterSpacing="1.4"
+                                   TextColor="{StaticResource TextSecondary}" VerticalOptions="Center" />
+                            <Label Grid.Column="2" Text="↺ Re-review…" FontSize="13"
+                                   TextColor="{StaticResource WarnAmber}" VerticalOptions="Center"
+                                   IsVisible="{Binding IsSelectionMode, Converter={StaticResource InvertedBool}}">
+                                <Label.GestureRecognizers>
+                                    <TapGestureRecognizer Command="{Binding StartReReviewSelectionCommand}" />
+                                </Label.GestureRecognizers>
+                            </Label>
+                            <Label Grid.Column="1" Text="Select all" FontSize="13"
+                                   TextColor="{StaticResource Accent}" VerticalOptions="Center"
+                                   IsVisible="{Binding IsSelectionMode}">
+                                <Label.GestureRecognizers>
+                                    <TapGestureRecognizer Command="{Binding SelectAllMonthsCommand}" />
+                                </Label.GestureRecognizers>
+                            </Label>
+                            <Label Grid.Column="2" Text="Cancel" FontSize="13"
+                                   TextColor="{StaticResource TextSecondary}" VerticalOptions="Center"
+                                   IsVisible="{Binding IsSelectionMode}">
+                                <Label.GestureRecognizers>
+                                    <TapGestureRecognizer Command="{Binding CancelSelectionCommand}" />
+                                </Label.GestureRecognizers>
+                            </Label>
+                        </Grid>
+                    </VerticalStackLayout>
+                </CollectionView.Header>
+
+                <CollectionView.ItemTemplate>
+                    <DataTemplate x:DataType="vm:MonthCard">
+                        <Grid Padding="20,5">
+                            <Border BackgroundColor="{StaticResource Surface}"
+                                    StrokeThickness="0" StrokeShape="RoundRectangle 18"
+                                    Padding="12">
+                                <Border.GestureRecognizers>
+                                    <TapGestureRecognizer
+                                        Command="{Binding BindingContext.MonthTappedCommand, Source={x:Reference Page}}"
+                                        CommandParameter="{Binding .}" />
+                                </Border.GestureRecognizers>
+                                <Grid ColumnDefinitions="64,*,Auto" ColumnSpacing="14">
+                                    <Border StrokeThickness="0" StrokeShape="RoundRectangle 12"
+                                            WidthRequest="64" HeightRequest="64"
+                                            BackgroundColor="{StaticResource SurfaceAlt}">
+                                        <Image Source="{Binding Cover}" Aspect="AspectFill"
+                                               WidthRequest="64" HeightRequest="64" />
+                                    </Border>
+                                    <VerticalStackLayout Grid.Column="1" Spacing="5" VerticalOptions="Center">
+                                        <Label Text="{Binding DisplayName}"
+                                               FontSize="16" FontAttributes="Bold"
+                                               TextColor="{StaticResource TextPrimary}" />
+                                        <Label Text="{Binding ProgressText}"
+                                               FontSize="12" TextColor="{StaticResource TextSecondary}" />
+                                        <ProgressBar Progress="{Binding Progress}"
+                                                     ProgressColor="{StaticResource KeepGreen}"
+                                                     BackgroundColor="{StaticResource SurfaceAlt}" />
+                                    </VerticalStackLayout>
+                                    <Label Grid.Column="2" Text="{Binding StatusGlyph}"
+                                           FontSize="18" TextColor="{StaticResource TextSecondary}"
+                                           VerticalOptions="Center"
+                                           IsVisible="{Binding BindingContext.IsSelectionMode, Source={x:Reference Page}, Converter={StaticResource InvertedBool}}" />
+                                    <Label Grid.Column="2" FontSize="20" VerticalOptions="Center"
+                                           IsVisible="{Binding BindingContext.IsSelectionMode, Source={x:Reference Page}}">
+                                        <Label.Triggers>
+                                            <DataTrigger TargetType="Label" Binding="{Binding IsSelected}" Value="True">
+                                                <Setter Property="Text" Value="●" />
+                                                <Setter Property="TextColor" Value="{StaticResource WarnAmber}" />
+                                            </DataTrigger>
+                                            <DataTrigger TargetType="Label" Binding="{Binding IsSelected}" Value="False">
+                                                <Setter Property="Text" Value="○" />
+                                                <Setter Property="TextColor" Value="{StaticResource TextSecondary}" />
+                                            </DataTrigger>
+                                        </Label.Triggers>
+                                    </Label>
+                                </Grid>
+                            </Border>
+                        </Grid>
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+
+                <CollectionView.Footer>
+                    <Grid HeightRequest="32" />
+                </CollectionView.Footer>
+
+                <CollectionView.EmptyView>
+                    <VerticalStackLayout Padding="40,60" Spacing="10">
+                        <Label Text="No photos found" FontSize="17" FontAttributes="Bold"
+                               TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+                        <Label Text="Pull down to refresh once your gallery has photos."
+                               FontSize="13" TextColor="{StaticResource TextSecondary}"
+                               HorizontalTextAlignment="Center" />
+                    </VerticalStackLayout>
+                </CollectionView.EmptyView>
+            </CollectionView>
+        </RefreshView>
+
+        <!-- Floating action for the month selection -->
+        <Button Text="{Binding ReReviewButtonText}" Command="{Binding ReReviewSelectedCommand}"
+                IsVisible="{Binding HasSelectedMonths}"
+                VerticalOptions="End" Margin="16,0,16,20" HeightRequest="52" CornerRadius="16"
+                BackgroundColor="{StaticResource WarnAmber}" TextColor="#1B1B2F"
+                FontAttributes="Bold" />
+    </Grid>
+</ContentPage>

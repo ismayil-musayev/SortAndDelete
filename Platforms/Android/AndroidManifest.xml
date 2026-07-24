@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+	<application android:allowBackup="true" android:icon="@mipmap/appicon" android:roundIcon="@mipmap/appicon_round" android:supportsRtl="true" android:label="Sort &amp; Delete"></application>
+
+	<!-- No INTERNET permission on purpose: everything stays on the device. -->
+
+	<!-- Photo/video library access: READ_MEDIA_* on Android 13+, READ_EXTERNAL_STORAGE before -->
+	<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+	<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+	<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+	<!-- Android 14+ "allow selected photos only" partial access -->
+	<uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+	<!-- Legacy write path for the Android 10 delete fallback -->
+	<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+	<!-- Haptic feedback on swipe decisions -->
+	<uses-permission android:name="android.permission.VIBRATE" />
+</manifest>
