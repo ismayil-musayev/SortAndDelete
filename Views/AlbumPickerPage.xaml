@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="SortAndDelete.Views.AlbumPickerPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:models="clr-namespace:SortAndDelete.Models"
+    Shell.NavBarIsVisible="False"
+    BackgroundColor="{StaticResource AppBackground}">
+
+    <Grid RowDefinitions="Auto,Auto,*,Auto" Padding="16,18,16,20" RowSpacing="12">
+
+        <Label Grid.Row="0" Text="Move to album" FontSize="21" FontAttributes="Bold"
+               TextColor="{StaticResource TextPrimary}" />
+
+        <Grid Grid.Row="1" ColumnDefinitions="*,*" ColumnSpacing="10">
+            <Button Text="＋ New album" Clicked="OnCreateClicked"
+                    HeightRequest="50" CornerRadius="14"
+                    BackgroundColor="{StaticResource Accent}" TextColor="White" />
+            <Button Grid.Column="1" x:Name="BrowseButton" Text="📂 Browse…" Clicked="OnBrowseClicked"
+                    HeightRequest="50" CornerRadius="14"
+                    BackgroundColor="{StaticResource SurfaceAlt}"
+                    TextColor="{StaticResource TextPrimary}" />
+        </Grid>
+
+        <CollectionView Grid.Row="2" x:Name="AlbumList" SelectionMode="None">
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="models:AlbumInfo">
+                    <Grid Padding="0,4">
+                        <Border BackgroundColor="{StaticResource Surface}"
+                                StrokeThickness="0" StrokeShape="RoundRectangle 14"
+                                Padding="16,13">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Tapped="OnAlbumTapped" CommandParameter="{Binding .}" />
+                            </Border.GestureRecognizers>
+                            <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
+                                <Label Text="📁" FontSize="18" VerticalOptions="Center" />
+                                <VerticalStackLayout Grid.Column="1" Spacing="1" VerticalOptions="Center">
+                                    <Label Text="{Binding Name}" FontSize="15"
+                                           TextColor="{StaticResource TextPrimary}" />
+                                    <Label Text="{Binding Subtitle}" FontSize="11"
+                                           TextColor="{StaticResource TextSecondary}"
+                                           LineBreakMode="MiddleTruncation"
+                                           IsVisible="{Binding Subtitle, Converter={StaticResource IsNotNullOrEmpty}}" />
+                                </VerticalStackLayout>
+                                <Label Grid.Column="2" Text="{Binding CountText}" FontSize="12"
+                                       TextColor="{StaticResource TextSecondary}" VerticalOptions="Center" />
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+            <CollectionView.EmptyView>
+                <Label Text="No albums yet — create one above."
+                       FontSize="14" TextColor="{StaticResource TextSecondary}"
+                       HorizontalOptions="Center" Margin="0,40" />
+            </CollectionView.EmptyView>
+        </CollectionView>
+
+        <Button Grid.Row="3" Text="Cancel" Clicked="OnCancelClicked"
+                HeightRequest="50" CornerRadius="14"
+                BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextPrimary}" />
+    </Grid>
+</ContentPage>

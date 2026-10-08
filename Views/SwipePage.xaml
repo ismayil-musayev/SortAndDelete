@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="SortAndDelete.Views.SwipePage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:vm="clr-namespace:SortAndDelete.ViewModels"
+    x:DataType="vm:SwipeViewModel"
+    Shell.NavBarIsVisible="False"
+    BackgroundColor="{StaticResource AppBackground}">
+
+    <Grid RowDefinitions="Auto,Auto,*,Auto" Padding="0,8,0,14">
+
+        <!-- ===== Header ===== -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Padding="12,4" ColumnSpacing="8">
+            <Button Text="‹" Clicked="OnBackClicked"
+                    FontSize="30" WidthRequest="44" HeightRequest="44" CornerRadius="22"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextPrimary}"
+                    Padding="0,0,0,4" />
+            <VerticalStackLayout Grid.Column="1" Spacing="1" VerticalOptions="Center" HorizontalOptions="Center">
+                <Label Text="{Binding Title}" FontSize="17" FontAttributes="Bold"
+                       TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+                <Label Text="{Binding PositionText}" FontSize="12"
+                       TextColor="{StaticResource TextSecondary}" HorizontalOptions="Center" />
+            </VerticalStackLayout>
+            <Button Grid.Column="2" Text="{Binding BinBadgeText}" Clicked="OnBinClicked"
+                    FontSize="13" HeightRequest="38" CornerRadius="19" Padding="14,0"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextPrimary}" />
+        </Grid>
+
+        <!-- ===== Month progress ===== -->
+        <ProgressBar Grid.Row="1" Progress="{Binding Progress}" Margin="20,6"
+                     ProgressColor="{StaticResource Accent}"
+                     BackgroundColor="{StaticResource Surface}" />
+
+        <!-- ===== Card deck ===== -->
+        <Grid Grid.Row="2" x:Name="DeckArea" Margin="18,10">
+
+            <!-- Back card (next photo peeking through) -->
+            <Border x:Name="BackCard"
+                    IsVisible="{Binding IsDone, Converter={StaticResource InvertedBool}}"
+                    BackgroundColor="{StaticResource Surface}"
+                    StrokeThickness="0" StrokeShape="RoundRectangle 26"
+                    Scale="0.94" TranslationY="16" Opacity="0.7">
+                <Image Source="{Binding NextImage}" Aspect="AspectFit" />
+            </Border>
+
+            <!-- Front card (the one being swiped) -->
+            <Border x:Name="FrontCard"
+                    IsVisible="{Binding IsDone, Converter={StaticResource InvertedBool}}"
+                    BackgroundColor="{StaticResource Surface}"
+                    StrokeThickness="0" StrokeShape="RoundRectangle 26"
+                    AnchorY="0.85">
+                <Border.GestureRecognizers>
+                    <TapGestureRecognizer NumberOfTapsRequired="2" Tapped="OnCardDoubleTapped" />
+                </Border.GestureRecognizers>
+                <Grid>
+                    <Image x:Name="CardImage" Source="{Binding CurrentImage}" Aspect="AspectFit" />
+
+                    <!-- Date + file/location badge -->
+                    <Border BackgroundColor="#B3000000" StrokeThickness="0"
+                            StrokeShape="RoundRectangle 12" Padding="10,5"
+                            HorizontalOptions="Start" VerticalOptions="End" Margin="12"
+                            MaximumWidthRequest="250">
+                        <VerticalStackLayout Spacing="1">
+                            <Label Text="{Binding CurrentDateText}" FontSize="12" TextColor="White" />
+                            <Label Text="{Binding CurrentLocationText}" FontSize="10"
+                                   TextColor="#CCFFFFFF" LineBreakMode="MiddleTruncation"
+                                   IsVisible="{Binding CurrentLocationText, Converter={StaticResource IsNotNullOrEmpty}}" />
+                        </VerticalStackLayout>
+                    </Border>
+
+                    <!-- Open with the default gallery/viewer app -->
+                    <Button Text="↗" Clicked="OnOpenExternallyClicked"
+                            IsVisible="{Binding CanOpenExternally}"
+                            FontSize="18" WidthRequest="42" HeightRequest="42" CornerRadius="21" Padding="0"
+                            BackgroundColor="#B3000000" TextColor="White"
+                            HorizontalOptions="End" VerticalOptions="Start" Margin="12" />
+
+                    <!-- Size + video badges -->
+                    <HorizontalStackLayout HorizontalOptions="End" VerticalOptions="End" Margin="12" Spacing="6">
+                        <Border BackgroundColor="#B3000000" StrokeThickness="0"
+                                StrokeShape="RoundRectangle 12" Padding="10,5"
+                                IsVisible="{Binding IsCurrentVideo}">
+                            <Label FontSize="12" TextColor="White">
+                                <Label.FormattedText>
+                                    <FormattedString>
+                                        <Span Text="▶ " />
+                                        <Span Text="{Binding CurrentDurationText}" />
+                                    </FormattedString>
+                                </Label.FormattedText>
+                            </Label>
+                        </Border>
+                        <Border BackgroundColor="#B3000000" StrokeThickness="0"
+                                StrokeShape="RoundRectangle 12" Padding="10,5"
+                                IsVisible="{Binding CurrentSizeText, Converter={StaticResource IsNotNullOrEmpty}}">
+                            <Label Text="{Binding CurrentSizeText}" FontSize="12" TextColor="White" />
+                        </Border>
+                    </HorizontalStackLayout>
+
+                    <!-- KEEP badge (appears while dragging right) -->
+                    <Border x:Name="KeepBadge" Opacity="0" Rotation="-14"
+                            HorizontalOptions="Start" VerticalOptions="Start" Margin="18,22"
+                            BackgroundColor="Transparent" Stroke="{StaticResource KeepGreen}"
+                            StrokeThickness="3" StrokeShape="RoundRectangle 8" Padding="12,4">
+                        <Label Text="KEEP" FontSize="26" FontAttributes="Bold"
+                               TextColor="{StaticResource KeepGreen}" CharacterSpacing="2" />
+                    </Border>
+
+                    <!-- DELETE badge (appears while dragging left) -->
+                    <Border x:Name="DeleteBadge" Opacity="0" Rotation="14"
+                            HorizontalOptions="End" VerticalOptions="Start" Margin="18,22"
+                            BackgroundColor="Transparent" Stroke="{StaticResource DangerRed}"
+                            StrokeThickness="3" StrokeShape="RoundRectangle 8" Padding="12,4">
+                        <Label Text="DELETE" FontSize="26" FontAttributes="Bold"
+                               TextColor="{StaticResource DangerRed}" CharacterSpacing="2" />
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- Month finished -->
+            <VerticalStackLayout IsVisible="{Binding IsDone}" Spacing="14"
+                                 VerticalOptions="Center" HorizontalOptions="Center" Padding="30">
+                <Label Text="🎉" FontSize="60" HorizontalOptions="Center" />
+                <Label Text="{Binding DoneTitle}" FontSize="24" FontAttributes="Bold"
+                       TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+                <Label Text="{Binding DoneSubtitle}"
+                       FontSize="14" TextColor="{StaticResource TextSecondary}"
+                       HorizontalTextAlignment="Center" />
+                <Button Text="Review the bin" Clicked="OnBinClicked" Margin="0,14,0,0"
+                        BackgroundColor="{StaticResource Accent}" TextColor="White"
+                        CornerRadius="14" HeightRequest="50" />
+                <Button Text="↺  Re-review this month" Clicked="OnReReviewClicked"
+                        IsVisible="{Binding IsMonthMode}"
+                        BackgroundColor="{StaticResource Surface}"
+                        TextColor="{StaticResource WarnAmber}"
+                        CornerRadius="14" HeightRequest="50" />
+                <Button Text="Back to months" Clicked="OnBackClicked"
+                        BackgroundColor="{StaticResource Surface}"
+                        TextColor="{StaticResource TextPrimary}"
+                        CornerRadius="14" HeightRequest="50" />
+            </VerticalStackLayout>
+
+            <ActivityIndicator IsRunning="{Binding IsLoading}" IsVisible="{Binding IsLoading}"
+                               Color="{StaticResource Accent}"
+                               VerticalOptions="Center" HorizontalOptions="Center" />
+        </Grid>
+
+        <!-- ===== Action buttons ===== -->
+        <Grid Grid.Row="3" IsVisible="{Binding IsDone, Converter={StaticResource InvertedBool}}"
+              ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,*" ColumnSpacing="14" Padding="0,10,0,0">
+
+            <Button Grid.Column="1" Text="↺" Clicked="OnUndoClicked" IsEnabled="{Binding CanUndo}"
+                    FontSize="20" WidthRequest="48" HeightRequest="48" CornerRadius="24" Padding="0"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource WarnAmber}"
+                    VerticalOptions="Center" />
+
+            <Button Grid.Column="2" Text="✕" Clicked="OnDeleteClicked"
+                    FontSize="26" WidthRequest="66" HeightRequest="66" CornerRadius="33" Padding="0"
+                    BackgroundColor="{StaticResource DangerRed}" TextColor="White"
+                    VerticalOptions="Center" />
+
+            <Button Grid.Column="3" Text="»" Clicked="OnLaterClicked"
+                    FontSize="24" WidthRequest="48" HeightRequest="48" CornerRadius="24" Padding="0,0,0,4"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextSecondary}"
+                    VerticalOptions="Center" />
+
+            <Button Grid.Column="4" Text="✓" Clicked="OnKeepClicked"
+                    FontSize="26" WidthRequest="66" HeightRequest="66" CornerRadius="33" Padding="0"
+                    BackgroundColor="{StaticResource KeepGreen}" TextColor="White"
+                    VerticalOptions="Center" />
+
+            <Button Grid.Column="5" Text="📁" Clicked="OnAlbumClicked"
+                    FontSize="18" WidthRequest="48" HeightRequest="48" CornerRadius="24" Padding="0"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextPrimary}"
+                    VerticalOptions="Center" />
+        </Grid>
+    </Grid>
+</ContentPage>

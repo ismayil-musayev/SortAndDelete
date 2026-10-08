@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="SortAndDelete.Views.BinPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:vm="clr-namespace:SortAndDelete.ViewModels"
+    x:DataType="vm:BinViewModel"
+    x:Name="Page"
+    Shell.NavBarIsVisible="False"
+    BackgroundColor="{StaticResource AppBackground}">
+
+    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto" Padding="0,8,0,14">
+
+        <!-- ===== Header ===== -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Padding="12,4" ColumnSpacing="8">
+            <Button Text="‹" Clicked="OnBackClicked"
+                    FontSize="30" WidthRequest="44" HeightRequest="44" CornerRadius="22"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextPrimary}"
+                    Padding="0,0,0,4" />
+            <VerticalStackLayout Grid.Column="1" Spacing="1" VerticalOptions="Center" HorizontalOptions="Center">
+                <Label Text="Bin" FontSize="17" FontAttributes="Bold"
+                       TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+                <Label Text="{Binding SummaryText}" FontSize="12"
+                       TextColor="{StaticResource TextSecondary}" HorizontalOptions="Center" />
+            </VerticalStackLayout>
+            <Button Grid.Column="2" Text="Restore all" Command="{Binding RestoreAllCommand}"
+                    IsVisible="{Binding IsEmpty, Converter={StaticResource InvertedBool}}"
+                    FontSize="13" HeightRequest="38" CornerRadius="19" Padding="14,0"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource KeepGreen}" />
+        </Grid>
+
+        <!-- ===== Safety hint ===== -->
+        <Border Grid.Row="1" Margin="16,6" Padding="14,10"
+                BackgroundColor="{StaticResource Surface}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 14">
+            <Label Text="{Binding SafetyHint}" FontSize="12"
+                   TextColor="{StaticResource TextSecondary}" />
+        </Border>
+
+        <!-- ===== Photo grid ===== -->
+        <CollectionView Grid.Row="2" ItemsSource="{Binding Items}" SelectionMode="None" Margin="12,4">
+            <CollectionView.ItemsLayout>
+                <GridItemsLayout Orientation="Vertical" Span="3"
+                                 HorizontalItemSpacing="8" VerticalItemSpacing="8" />
+            </CollectionView.ItemsLayout>
+
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="vm:BinItem">
+                    <Border BackgroundColor="{StaticResource Surface}"
+                            StrokeThickness="0" StrokeShape="RoundRectangle 14"
+                            HeightRequest="150">
+                        <Grid RowDefinitions="*,Auto">
+                            <Image Grid.RowSpan="2" Source="{Binding Thumbnail}" Aspect="AspectFill" />
+                            <Label Grid.Row="1" Text="{Binding SizeText}"
+                                   FontSize="10" TextColor="White"
+                                   BackgroundColor="#99000000"
+                                   HorizontalTextAlignment="Center" Padding="0,2" />
+                            <Button Text="↺"
+                                    Command="{Binding BindingContext.RestoreCommand, Source={x:Reference Page}}"
+                                    CommandParameter="{Binding .}"
+                                    FontSize="15" WidthRequest="34" HeightRequest="34" CornerRadius="17"
+                                    Padding="0" Margin="6"
+                                    BackgroundColor="#CC000000" TextColor="{StaticResource KeepGreen}"
+                                    HorizontalOptions="End" VerticalOptions="Start" />
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+
+            <CollectionView.EmptyView>
+                <VerticalStackLayout Padding="40,80" Spacing="12">
+                    <Label Text="🕊️" FontSize="52" HorizontalOptions="Center" />
+                    <Label Text="The bin is empty" FontSize="18" FontAttributes="Bold"
+                           TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+                    <Label Text="Deleted photos land here first, so one wrong tap never costs you a photo."
+                           FontSize="13" TextColor="{StaticResource TextSecondary}"
+                           HorizontalTextAlignment="Center" />
+                </VerticalStackLayout>
+            </CollectionView.EmptyView>
+        </CollectionView>
+
+        <!-- ===== In system trash (Android): restorable for ~30 days ===== -->
+        <VerticalStackLayout Grid.Row="3" IsVisible="{Binding HasCommitted}" Spacing="8" Margin="16,10,16,0">
+            <Label Text="IN SYSTEM TRASH — TAP ↺ TO RESTORE" FontSize="11" CharacterSpacing="1.2"
+                   TextColor="{StaticResource TextSecondary}" />
+            <CollectionView ItemsSource="{Binding CommittedItems}" HeightRequest="104" SelectionMode="None">
+                <CollectionView.ItemsLayout>
+                    <LinearItemsLayout Orientation="Horizontal" ItemSpacing="8" />
+                </CollectionView.ItemsLayout>
+                <CollectionView.ItemTemplate>
+                    <DataTemplate x:DataType="vm:BinItem">
+                        <Border BackgroundColor="{StaticResource Surface}" StrokeThickness="0"
+                                StrokeShape="RoundRectangle 12" WidthRequest="104" HeightRequest="104">
+                            <Grid>
+                                <Image Source="{Binding Thumbnail}" Aspect="AspectFill" Opacity="0.55" />
+                                <Button Text="↺"
+                                        Command="{Binding BindingContext.RestoreCommittedCommand, Source={x:Reference Page}}"
+                                        CommandParameter="{Binding .}"
+                                        FontSize="16" WidthRequest="38" HeightRequest="38" CornerRadius="19"
+                                        Padding="0"
+                                        BackgroundColor="#CC000000" TextColor="{StaticResource KeepGreen}"
+                                        HorizontalOptions="Center" VerticalOptions="Center" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </CollectionView.ItemTemplate>
+            </CollectionView>
+        </VerticalStackLayout>
+
+        <!-- ===== Empty bin button ===== -->
+        <Button Grid.Row="4" Text="{Binding EmptyButtonText}" Command="{Binding EmptyCommand}"
+                IsVisible="{Binding IsEmpty, Converter={StaticResource InvertedBool}}"
+                IsEnabled="{Binding IsBusy, Converter={StaticResource InvertedBool}}"
+                Margin="16,8,16,0" HeightRequest="52" CornerRadius="16"
+                BackgroundColor="{StaticResource DangerRed}" TextColor="White"
+                FontAttributes="Bold" />
+    </Grid>
+</ContentPage>

@@ -1,0 +1,191 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage
+    x:Class="SortAndDelete.Views.DuplicatesPage"
+    xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+    xmlns:vm="clr-namespace:SortAndDelete.ViewModels"
+    x:DataType="vm:DuplicatesViewModel"
+    x:Name="Page"
+    Shell.NavBarIsVisible="False"
+    BackgroundColor="{StaticResource AppBackground}">
+
+    <Grid RowDefinitions="Auto,Auto,Auto,*,Auto" Padding="0,8,0,14">
+
+        <!-- ===== Header ===== -->
+        <Grid Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Padding="12,4" ColumnSpacing="8">
+            <Button Text="‹" Clicked="OnBackClicked"
+                    FontSize="30" WidthRequest="44" HeightRequest="44" CornerRadius="22"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextPrimary}"
+                    Padding="0,0,0,4" />
+            <VerticalStackLayout Grid.Column="1" Spacing="1" VerticalOptions="Center" HorizontalOptions="Center">
+                <Label Text="Duplicates" FontSize="17" FontAttributes="Bold"
+                       TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+                <Label Text="{Binding SummaryText}" FontSize="12"
+                       TextColor="{StaticResource TextSecondary}" HorizontalOptions="Center" />
+            </VerticalStackLayout>
+            <Button Grid.Column="2" Text="↻" Command="{Binding RescanCommand}"
+                    IsEnabled="{Binding IsScanning, Converter={StaticResource InvertedBool}}"
+                    FontSize="17" WidthRequest="44" HeightRequest="44" CornerRadius="22"
+                    Padding="0"
+                    BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextSecondary}" />
+        </Grid>
+
+        <!-- ===== Strictness picker: each level shows what it would actually find ===== -->
+        <ScrollView Grid.Row="1" Orientation="Horizontal" HorizontalScrollBarVisibility="Never"
+                    Margin="0,6,0,0">
+            <HorizontalStackLayout Spacing="8" Padding="12,0" BindableLayout.ItemsSource="{Binding Levels}">
+                <BindableLayout.ItemTemplate>
+                    <DataTemplate x:DataType="vm:LevelChip">
+                        <Border StrokeThickness="0" StrokeShape="RoundRectangle 14" Padding="14,8">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer
+                                    Command="{Binding BindingContext.SelectLevelCommand, Source={x:Reference Page}}"
+                                    CommandParameter="{Binding .}" />
+                            </Border.GestureRecognizers>
+                            <Border.Triggers>
+                                <DataTrigger TargetType="Border" Binding="{Binding IsSelected}" Value="True">
+                                    <Setter Property="BackgroundColor" Value="{StaticResource Accent}" />
+                                </DataTrigger>
+                                <DataTrigger TargetType="Border" Binding="{Binding IsSelected}" Value="False">
+                                    <Setter Property="BackgroundColor" Value="{StaticResource Surface}" />
+                                </DataTrigger>
+                            </Border.Triggers>
+                            <VerticalStackLayout Spacing="1">
+                                <Label Text="{Binding Label}" FontSize="13" FontAttributes="Bold"
+                                       TextColor="{StaticResource TextPrimary}" />
+                                <Label Text="{Binding CountText}" FontSize="11"
+                                       TextColor="{StaticResource TextSecondary}" />
+                            </VerticalStackLayout>
+                        </Border>
+                    </DataTemplate>
+                </BindableLayout.ItemTemplate>
+            </HorizontalStackLayout>
+        </ScrollView>
+
+        <!-- ===== What the selected level means ===== -->
+        <Border Grid.Row="2" Margin="16,8,16,2" Padding="14,10"
+                BackgroundColor="{StaticResource Surface}"
+                StrokeThickness="0" StrokeShape="RoundRectangle 14">
+            <Label Text="{Binding LevelHint}" FontSize="12"
+                   TextColor="{StaticResource TextSecondary}" />
+        </Border>
+
+        <!-- ===== Groups ===== -->
+        <CollectionView Grid.Row="3" ItemsSource="{Binding Groups}" SelectionMode="None" Margin="12,8">
+            <CollectionView.ItemTemplate>
+                <DataTemplate x:DataType="vm:DuplicateGroupCard">
+                    <Border BackgroundColor="{StaticResource Surface}" Margin="0,0,0,10"
+                            StrokeThickness="0" StrokeShape="RoundRectangle 16" Padding="12,10">
+                        <VerticalStackLayout Spacing="8">
+
+                            <Grid ColumnDefinitions="*,Auto">
+                                <Label Text="{Binding HeaderText}" FontSize="13" FontAttributes="Bold"
+                                       TextColor="{StaticResource TextPrimary}" VerticalOptions="Center" />
+                                <Border Grid.Column="1" StrokeThickness="0" StrokeShape="RoundRectangle 8"
+                                        Padding="8,3" BackgroundColor="{StaticResource SurfaceAlt}">
+                                    <Border.Triggers>
+                                        <DataTrigger TargetType="Border" Binding="{Binding IsExact}" Value="True">
+                                            <Setter Property="BackgroundColor" Value="{StaticResource KeepGreen}" />
+                                        </DataTrigger>
+                                    </Border.Triggers>
+                                    <Label Text="{Binding BadgeText}" FontSize="10"
+                                           TextColor="{StaticResource TextPrimary}" />
+                                </Border>
+                            </Grid>
+
+                            <ScrollView Orientation="Horizontal" HorizontalScrollBarVisibility="Never">
+                                <HorizontalStackLayout Spacing="8" BindableLayout.ItemsSource="{Binding Items}">
+                                    <BindableLayout.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:DuplicateItem">
+                                            <VerticalStackLayout Spacing="3" WidthRequest="116">
+                                                <Border StrokeThickness="0" StrokeShape="RoundRectangle 12"
+                                                        HeightRequest="116" BackgroundColor="{StaticResource SurfaceAlt}">
+                                                    <Border.GestureRecognizers>
+                                                        <TapGestureRecognizer
+                                                            Command="{Binding BindingContext.ToggleCommand, Source={x:Reference Page}}"
+                                                            CommandParameter="{Binding .}" />
+                                                    </Border.GestureRecognizers>
+                                                    <Grid>
+                                                        <Image Source="{Binding Thumbnail}" Aspect="AspectFill" />
+
+                                                        <!-- Marked for the bin -->
+                                                        <Grid IsVisible="{Binding IsSelected}"
+                                                              BackgroundColor="#B3FF5A5F">
+                                                            <Label Text="✓" FontSize="34" TextColor="White"
+                                                                   HorizontalOptions="Center" VerticalOptions="Center" />
+                                                        </Grid>
+
+                                                        <!-- The copy the app suggests keeping -->
+                                                        <Border IsVisible="{Binding IsKeeper}"
+                                                                BackgroundColor="{StaticResource KeepGreen}"
+                                                                StrokeThickness="0" StrokeShape="RoundRectangle 7"
+                                                                Padding="6,2" Margin="5"
+                                                                HorizontalOptions="Start" VerticalOptions="Start">
+                                                            <Label Text="KEEP" FontSize="9" FontAttributes="Bold"
+                                                                   TextColor="White" />
+                                                        </Border>
+                                                    </Grid>
+                                                </Border>
+                                                <Label Text="{Binding DimensionsText}" FontSize="10"
+                                                       TextColor="{StaticResource TextPrimary}" />
+                                                <Label Text="{Binding SizeText}" FontSize="10"
+                                                       TextColor="{StaticResource TextSecondary}" />
+                                                <Label Text="{Binding LocationText}" FontSize="9" MaxLines="2"
+                                                       LineBreakMode="TailTruncation"
+                                                       TextColor="{StaticResource TextSecondary}" />
+                                            </VerticalStackLayout>
+                                        </DataTemplate>
+                                    </BindableLayout.ItemTemplate>
+                                </HorizontalStackLayout>
+                            </ScrollView>
+                        </VerticalStackLayout>
+                    </Border>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+
+            <CollectionView.EmptyView>
+                <VerticalStackLayout Padding="40,60" Spacing="12">
+                    <Label Text="🧬" FontSize="52" HorizontalOptions="Center" />
+                    <Label Text="No duplicates at this level" FontSize="18" FontAttributes="Bold"
+                           TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+                    <Label Text="Try a looser level above — each one asks a different question, and the count next to it tells you what it would find."
+                           FontSize="13" TextColor="{StaticResource TextSecondary}"
+                           HorizontalTextAlignment="Center" />
+                </VerticalStackLayout>
+            </CollectionView.EmptyView>
+        </CollectionView>
+
+        <!-- ===== Scanning ===== -->
+        <VerticalStackLayout Grid.Row="3" IsVisible="{Binding IsScanning}" Spacing="14"
+                             Padding="40" VerticalOptions="Center">
+            <ActivityIndicator IsRunning="{Binding IsScanning}" Color="{StaticResource Accent}"
+                               HeightRequest="40" />
+            <Label Text="Fingerprinting your library" FontSize="16" FontAttributes="Bold"
+                   TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+            <ProgressBar Progress="{Binding ScanProgress}" ProgressColor="{StaticResource Accent}"
+                         BackgroundColor="{StaticResource Surface}" />
+            <Label Text="{Binding ScanStatus}" FontSize="12"
+                   TextColor="{StaticResource TextSecondary}" HorizontalTextAlignment="Center" />
+            <Label Text="This runs once. After that, opening this screen and switching between levels is instant."
+                   FontSize="12" TextColor="{StaticResource TextSecondary}"
+                   HorizontalTextAlignment="Center" />
+        </VerticalStackLayout>
+
+        <!-- ===== Actions ===== -->
+        <VerticalStackLayout Grid.Row="4" IsVisible="{Binding HasGroups}" Spacing="8" Margin="16,4,16,0">
+            <Grid ColumnDefinitions="*,*" ColumnSpacing="8">
+                <Button Text="Select all extras" Command="{Binding SelectAllExtrasCommand}"
+                        FontSize="13" HeightRequest="40" CornerRadius="14"
+                        BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextPrimary}" />
+                <Button Grid.Column="1" Text="Clear selection" Command="{Binding ClearSelectionCommand}"
+                        FontSize="13" HeightRequest="40" CornerRadius="14"
+                        BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextSecondary}" />
+            </Grid>
+            <Button Text="{Binding BinButtonText}" Command="{Binding SendToBinCommand}"
+                    IsEnabled="{Binding CanBin}"
+                    HeightRequest="52" CornerRadius="16"
+                    BackgroundColor="{StaticResource DangerRed}" TextColor="White"
+                    FontAttributes="Bold" />
+        </VerticalStackLayout>
+    </Grid>
+</ContentPage>
