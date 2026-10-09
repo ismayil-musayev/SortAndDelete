@@ -39,7 +39,6 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
         IsLoading = true;
         try
         {
-            await gallery.GetPhotosAsync(); // warm the cache so thumbnails resolve
             var pending = await gallery.Store.GetPendingTrashAsync();
 
             Items.Clear();
