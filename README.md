@@ -166,11 +166,16 @@ uris on every version. And a query on an item's own uri finds it even in the sys
 also names the volume: MediaStore puts a moved item on the volume its uri names, and renames a
 trashed item to `.trashed-…` (and a restored one back) on that volume too. `external` means
 internal storage, so an item on an SD card is moved, trashed and restored (and its consent asked
-for) through `content://media/<its volume>/…/<id>`. Through `external`, Android 10 to 15 refuse
-the change ("Changing volume … not allowed"); Android 16's MediaStore rewrites `external` to the
-item's volume. The system consent screen reports success even when that update fails (it swallows
-the error), so after a trash or restore request the app checks that every item really left the
-gallery, or is back in it.
+for) through `content://media/<its volume>/…/<id>`. Through `external`, MediaStore refuses the
+change ("Changing volume … not allowed"), except in Android 16's MediaProvider module (which
+Google Play system updates also bring to Android 11 and later): in an update that moves the file,
+it rewrites `external` to the item's volume. Thumbnails stay on `external`, though: MediaProvider
+caches a thumbnail on the volume its uri names (Android 16's module always on internal storage),
+and on a card that cache can be read-only, full, or, on Android 10, which never checks it, left
+over from another phone. A trash or restore request names only the items that can still change,
+since one on a card that isn't mounted fails the whole batch; and the system consent screen
+reports success even when an update fails (it swallows the error), so afterwards the app checks
+that every item really left the gallery, or is back in it.
 
 The in-app bin exists precisely so that *accidental* swipes are always recoverable in one tap,
 regardless of platform restrictions.

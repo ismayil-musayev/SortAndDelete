@@ -69,8 +69,10 @@ public interface IPhotoLibraryService
 
     /// <summary>
     /// Moves photos to the system trash (Android 11+) or "Recently Deleted" (iOS), where the OS
-    /// purges them after ~30 days. Shows the platform consent dialog. Returns true when confirmed
-    /// and every item is in the trash (Android checks: its dialog reports success either way).
+    /// purges them after ~30 days. Shows the platform consent dialog for the ones the library still
+    /// has. True once the library has none of them, also when some had gone already (into the
+    /// trash, or for good). Android 11+ checks that afterwards, as its dialog reports success
+    /// either way; false then means the user said no, or not every one went (some may have).
     /// Android 10 has no system trash: there they are deleted for good, through the folders the
     /// user opens for the app in the system folder picker (once per folder). True means every one
     /// is gone. False means not every one is: the user backed out of the folder picker (then none
@@ -78,7 +80,12 @@ public interface IPhotoLibraryService
     /// </summary>
     Task<bool> MoveToSystemTrashAsync(IReadOnlyList<string> photoIds);
 
-    /// <summary>Restores items out of the system trash (Android 11+ only, see <see cref="CanRestoreFromSystemTrash"/>).</summary>
+    /// <summary>
+    /// Restores items out of the system trash (Android 11+ only, see <see cref="CanRestoreFromSystemTrash"/>),
+    /// asking only for the ones still in it. True once each of those is back in the library (Android
+    /// checks afterwards, as its dialog reports success either way), also when none was left to
+    /// restore: purged from the trash elsewhere, or on a card that isn't mounted.
+    /// </summary>
     Task<bool> RestoreFromSystemTrashAsync(IReadOnlyList<string> photoIds);
 
     /// <summary>
