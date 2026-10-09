@@ -259,7 +259,16 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
                 ConfirmAsync = (title, message, accept) =>
                     Shell.Current.DisplayAlertAsync(title, message, accept, "Cancel"),
             };
-            result = await gallery.Library.MoveToAlbumAsync(photo.Id, album, feedback);
+            try
+            {
+                result = await gallery.Library.MoveToAlbumAsync(photo.Id, album, feedback);
+            }
+            finally
+            {
+                // Folder contents changed; copy-style moves even change ids. A move that failed or
+                // was cancelled can have changed the library too: a copy it could not remove stays.
+                gallery.Invalidate();
+            }
         }
         catch (Exception)
         {
@@ -299,8 +308,6 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
                 TargetAlbum = album.Name,
             });
         }
-
-        gallery.Invalidate(); // folder contents changed; copy-style moves even change ids
 
         if (result.OriginalKept)
         {

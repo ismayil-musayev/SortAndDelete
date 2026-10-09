@@ -5,7 +5,7 @@ namespace SortAndDelete.Services;
 
 /// <summary>
 /// Combines the platform photo library with the local review store:
-/// caches the photo list, builds month groups and deck queues, resolves folder filters.
+/// caches the photo and album lists, builds month groups and deck queues, resolves folder filters.
 /// </summary>
 public sealed class GalleryService(IPhotoLibraryService library, ReviewStore store)
 {
@@ -14,21 +14,37 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
 
     private List<PhotoAsset>? _photos;
     private Dictionary<string, PhotoAsset>? _byId;
+    private IReadOnlyList<AlbumInfo>? _albums;
     private readonly Dictionary<string, IReadOnlySet<string>> _folderMembers = [];
+
+    // Bumped whenever the library may have changed. The lists are current while they were
+    // loaded at the latest version.
+    private int _version;
+    private int _loadedVersion = -1;
+    private Task? _loading;
 
     public IPhotoLibraryService Library => library;
     public ReviewStore Store => store;
 
-    public async Task<IReadOnlyList<PhotoAsset>> GetPhotosAsync(bool refresh = false)
+    /// <summary>
+    /// Every photo and video, loaded together with <see cref="GetAlbumsAsync"/> and kept until
+    /// <see cref="Invalidate"/> or <see cref="MarkStale"/>.
+    /// </summary>
+    public async Task<IReadOnlyList<PhotoAsset>> GetPhotosAsync()
     {
-        if (_photos is null || refresh)
-        {
-            var items = await library.GetAllPhotosAsync();
-            _photos = [.. items];
-            _byId = _photos.ToDictionary(p => p.Id);
-            _folderMembers.Clear();
-        }
-        return _photos;
+        await EnsureLoadedAsync();
+        return _photos!;
+    }
+
+    /// <summary>
+    /// The albums the folder filter shows, from the same load as <see cref="GetPhotosAsync()"/>, so
+    /// their counts match the photos. Move targets come from the library itself: they need empty
+    /// and browsed folders as they are now.
+    /// </summary>
+    public async Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync()
+    {
+        await EnsureLoadedAsync();
+        return _albums!;
     }
 
     /// <summary>Call after photos were deleted/moved outside the cache's knowledge.</summary>
@@ -36,7 +52,49 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     {
         _photos = null;
         _byId = null;
+        _albums = null;
         _folderMembers.Clear();
+        _version++;
+    }
+
+    /// <summary>
+    /// Call when other apps may have changed the library, as while the app was in the background:
+    /// the next read loads it again. Until then <see cref="Find"/> answers from the list as loaded.
+    /// </summary>
+    public void MarkStale() => _version++;
+
+    /// <summary>
+    /// Loads photos and albums together when they are missing or older than the latest version.
+    /// One load runs at a time, and a change marked while it runs means another load after it.
+    /// </summary>
+    private async Task EnsureLoadedAsync()
+    {
+        while (_photos is null || _loadedVersion != _version)
+        {
+            var loading = _loading ??= LoadAsync(_version);
+            try
+            {
+                await loading;
+            }
+            finally
+            {
+                if (_loading == loading)
+                    _loading = null;
+            }
+        }
+    }
+
+    private async Task LoadAsync(int version)
+    {
+        var photos = library.GetAllPhotosAsync();
+        var albums = library.GetAlbumsAsync();
+        await Task.WhenAll(photos, albums);
+
+        _photos = [.. await photos];
+        _byId = _photos.ToDictionary(p => p.Id);
+        _albums = await albums;
+        _folderMembers.Clear();
+        _loadedVersion = version;
     }
 
     public PhotoAsset? Find(string photoId) =>

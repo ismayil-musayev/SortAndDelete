@@ -158,11 +158,14 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
         {
             var ids = Items.Select(i => i.PhotoId).ToList();
             var ok = await gallery.Library.MoveToSystemTrashAsync(ids);
+
+            // Android 10 deletes them one by one, each after its own consent, so some can be gone
+            // although the request as a whole failed.
+            gallery.Invalidate();
             if (!ok)
                 return; // user denied the system dialog — everything stays in the bin
 
             await gallery.Store.MarkCommittedAsync(ids);
-            gallery.Invalidate();
             await LoadAsync();
 
 #if IOS

@@ -89,12 +89,17 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     // double as the re-entrancy guard.
     private bool _loadInProgress;
 
-    public async Task LoadAsync(bool refresh = false)
+    // Completes when the latest load has ended.
+    private Task _loadEnded = Task.CompletedTask;
+
+    public async Task LoadAsync()
     {
         if (_loadInProgress)
             return;
 
         _loadInProgress = true;
+        var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _loadEnded = ended.Task;
         IsLoading = true;
         try
         {
@@ -107,7 +112,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
             }
 
             // The chips first: they settle which folder the totals and months are for.
-            await LoadFoldersAsync(refresh);
+            await LoadFoldersAsync();
 
             var groups = await gallery.GetMonthGroupsAsync(_selectedFolderId);
             var reviews = await gallery.Store.GetAllAsync();
@@ -161,18 +166,28 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         {
             _loadInProgress = false;
             IsLoading = false;
+            ended.SetResult();
         }
     }
 
     /// <summary>
-    /// Rebuilds the folder chips and settles the selection: a selected folder without a chip
-    /// falls back to All. Loads the photos for the Favourites count, from the library when
-    /// <paramref name="refresh"/> is set.
+    /// Loads the page again after the library may have changed. A load in progress may have read
+    /// the library before the change, so this waits for it to end and then loads.
     /// </summary>
-    private async Task LoadFoldersAsync(bool refresh)
+    public async Task ReloadAsync()
     {
-        var albums = await gallery.Library.GetAlbumsAsync();
-        var photos = await gallery.GetPhotosAsync(refresh);
+        await _loadEnded;
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Rebuilds the folder chips and settles the selection: a selected folder without a chip
+    /// falls back to All.
+    /// </summary>
+    private async Task LoadFoldersAsync()
+    {
+        var albums = await gallery.GetAlbumsAsync();
+        var photos = await gallery.GetPhotosAsync();
         var filter = FolderFilter.Build(albums, photos.Count(p => p.IsFavorite), _selectedFolderId);
 
         _selectedFolderId = filter.SelectedFolderId;
@@ -197,8 +212,14 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     [RelayCommand]
     private Task Refresh()
     {
+        // RefreshView runs this command whenever IsRefreshing turns true, so also when a load
+        // sets IsLoading through the two-way binding. Only a pull, with no load running, makes
+        // the gallery read the library again.
+        if (_loadInProgress)
+            return Task.CompletedTask;
+
         gallery.Invalidate();
-        return LoadAsync(refresh: true);
+        return LoadAsync();
     }
 
     [RelayCommand]
@@ -305,7 +326,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     {
         HasAccess = await gallery.Library.SelectMorePhotosAsync();
         gallery.Invalidate();
-        await LoadAsync(refresh: true);
+        await ReloadAsync();
     }
 
     [RelayCommand]
