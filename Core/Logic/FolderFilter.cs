@@ -19,9 +19,8 @@ public static class FolderFilter
 
     /// <summary>
     /// How folder ids compare: ignoring case, otherwise exactly. Shared storage ignores case, so
-    /// "DCIM/Camera/" and "dcim/Camera/" are one folder, while "/" (the storage root) and "" (no
-    /// relative path, so in no folder) stay apart. iOS ids are generated localIdentifiers, so
-    /// ignoring case is harmless there.
+    /// "DCIM/Camera/" and "dcim/Camera/" are one folder; "/" and "" are different ids. iOS ids are
+    /// generated localIdentifiers, so ignoring case is harmless there.
     /// </summary>
     public static StringComparer IdComparer { get; } = StringComparer.OrdinalIgnoreCase;
 
@@ -61,7 +60,7 @@ public static class FolderFilter
     /// The folders that hold something, counted from the items in them (on Android every item
     /// carries its folder's relative path), in <see cref="InDisplayOrder"/>. Spellings that differ
     /// only in case are one folder, under the spelling most items use (the first in ordinal order
-    /// when tied). Items without a relative path are in no folder.
+    /// when tied). Items with an empty or blank relative path are left out.
     /// </summary>
     public static List<AlbumInfo> FoldersOf(IEnumerable<PhotoAsset> photos) => InDisplayOrder(photos
         .Select(photo => photo.FolderPath)
@@ -72,6 +71,13 @@ public static class FolderFilter
             var id = MostCommon(paths);
             return new AlbumInfo { Id = id, Name = NameFor(id), Count = paths.Count(), Subtitle = id };
         }));
+
+    /// <summary>
+    /// The items in the folder <paramref name="folderId"/> (a relative path on Android): those whose
+    /// relative path matches it by <see cref="IdComparer"/>, every spelling the folder has.
+    /// </summary>
+    public static IEnumerable<PhotoAsset> ItemsIn(IEnumerable<PhotoAsset> photos, string folderId) =>
+        photos.Where(photo => IdComparer.Equals(photo.FolderPath, folderId));
 
     /// <summary>
     /// The chip row: "All folders", then "⭐ Favourites" while there are favourites, then a chip

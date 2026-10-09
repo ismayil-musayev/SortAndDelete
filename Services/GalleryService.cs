@@ -37,10 +37,11 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     }
 
     /// <summary>
-    /// The albums the folder filter shows, from the same load as <see cref="GetPhotosAsync()"/>, so
-    /// their counts match the photos: on Android the folders counted from the photos themselves
-    /// (<see cref="FolderFilter.FoldersOf"/>), elsewhere the library's albums. Move targets come
-    /// from the library itself: they need empty and browsed folders as they are now.
+    /// The albums the folder filter shows, from the same load as <see cref="GetPhotosAsync()"/>: on
+    /// Android the folders counted from the photos themselves (<see cref="FolderFilter.FoldersOf"/>),
+    /// so their counts match the photos; elsewhere the library's albums, with the counts it gives,
+    /// loaded alongside. Move targets come from the library itself: they need empty and browsed
+    /// folders as they are now.
     /// </summary>
     public async Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync()
     {
@@ -113,9 +114,8 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
 
     /// <summary>
     /// Photos visible under a folder filter. On Android the folder id is a relative path we
-    /// already carry on each photo; on iOS it's an album whose membership we fetch once. Ids
-    /// compare as the chips' do (<see cref="FolderFilter.IdComparer"/>), so a folder's months
-    /// count what its chip counts.
+    /// already carry on each photo, matched by <see cref="FolderFilter.ItemsIn"/>, so a folder's
+    /// months count what its chip counts; on iOS it's an album whose membership we fetch once.
     /// </summary>
     public async Task<IReadOnlyList<PhotoAsset>> GetPhotosAsync(string? folderId)
     {
@@ -128,7 +128,7 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
 
         if (!_folderMembers.TryGetValue(folderId, out var members))
         {
-            var direct = photos.Where(p => FolderFilter.IdComparer.Equals(p.FolderPath, folderId)).Select(p => p.Id).ToHashSet();
+            var direct = FolderFilter.ItemsIn(photos, folderId).Select(p => p.Id).ToHashSet();
             if (direct.Count == 0)
                 direct = (await library.GetAlbumMemberIdsAsync(folderId)).ToHashSet();
             _folderMembers[folderId] = members = direct;

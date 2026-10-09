@@ -133,9 +133,9 @@ public class FolderFilterTests
     }
 
     [Fact]
-    public void No_folder_is_not_the_storage_root()
+    public void A_selection_of_no_relative_path_falls_back_to_All()
     {
-        // "" is no relative path at all, so in no folder; "/" is the storage root, listed here.
+        // "/" is listed, and "" is a different id: no chip has it.
         var row = FolderFilter.Build(Gallery, favoriteCount: 0, "");
 
         Assert.Equal("All folders", Assert.Single(row.Chips, chip => chip.IsSelected).Label);
@@ -254,7 +254,7 @@ public class FolderFilterTests
     [Theory]
     [InlineData("")]
     [InlineData(" ")]
-    public void Items_without_a_relative_path_are_in_no_folder(string relativePath)
+    public void Items_without_a_relative_path_are_left_out(string relativePath)
     {
         PhotoAsset[] photos = [.. In(relativePath, 2), .. In("DCIM/Camera/", 1)];
 
@@ -284,5 +284,22 @@ public class FolderFilterTests
         Assert.Equal(fromAlbums.Chips, fromItems.Chips);
         Assert.Equal(fromAlbums.SelectedFolderId, fromItems.SelectedFolderId);
         Assert.Equal(fromAlbums.FellBack, fromItems.FellBack);
+    }
+
+    [Fact]
+    public void Every_folder_counts_the_items_its_filter_shows()
+    {
+        // Two folders in several spellings, the storage root, and items without a relative path.
+        PhotoAsset[] photos =
+        [
+            .. In("DCIM/Camera/", 3), .. In("dcim/Camera/", 2), .. In("DCIM/camera/", 1),
+            .. In("Pictures/Trips/", 1), .. In("pictures/trips/", 1),
+            .. In("/", 2), .. In("", 2), .. In("Download/", 1),
+        ];
+
+        var folders = FolderFilter.FoldersOf(photos);
+
+        Assert.Equal(["/", "DCIM/Camera/", "Download/", "Pictures/Trips/"], folders.Select(folder => folder.Id));
+        Assert.All(folders, folder => Assert.Equal(folder.Count, FolderFilter.ItemsIn(photos, folder.Id).Count()));
     }
 }
