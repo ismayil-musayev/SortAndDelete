@@ -106,7 +106,10 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
                 return;
             }
 
-            var groups = await gallery.GetMonthGroupsAsync(refresh, _selectedFolderId);
+            // The chips first: they settle which folder the totals and months are for.
+            await LoadFoldersAsync(refresh);
+
+            var groups = await gallery.GetMonthGroupsAsync(_selectedFolderId);
             var reviews = await gallery.Store.GetAllAsync();
             var pending = reviews.Where(r => r.Decision == SwipeDecision.Trash && r.CommittedAt == null).ToList();
             var freedBytes = await gallery.Store.GetFreedBytesAsync();
@@ -129,8 +132,6 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
             StreakText = streak.StreakDays > 0
                 ? $"🔥 {streak.StreakDays}-day streak · {streak.ReviewedToday} today"
                 : "";
-
-            await LoadFoldersAsync();
 
             // Same months in the same order → update rows in place so the
             // CollectionView keeps its scroll position when we come back here.
@@ -163,35 +164,21 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         }
     }
 
-    private async Task LoadFoldersAsync()
+    /// <summary>
+    /// Rebuilds the folder chips and settles the selection: a selected folder without a chip
+    /// falls back to All. Loads the photos for the Favourites count, from the library when
+    /// <paramref name="refresh"/> is set.
+    /// </summary>
+    private async Task LoadFoldersAsync(bool refresh)
     {
         var albums = await gallery.Library.GetAlbumsAsync();
-        var photos = await gallery.GetPhotosAsync();
-        int favorites = photos.Count(p => p.IsFavorite);
+        var photos = await gallery.GetPhotosAsync(refresh);
+        var filter = FolderFilter.Build(albums, photos.Count(p => p.IsFavorite), _selectedFolderId);
 
+        _selectedFolderId = filter.SelectedFolderId;
         Folders.Clear();
-        var all = new FolderChip(null, "All folders") { IsSelected = _selectedFolderId is null };
-        Folders.Add(all);
-
-        // The one virtual album Android exposes system-wide; Samsung/Google
-        // gallery "Favourites" show up here.
-        if (favorites > 0)
-        {
-            Folders.Add(new FolderChip(GalleryService.FavoritesFolderId, $"⭐ Favourites · {favorites}")
-            {
-                IsSelected = _selectedFolderId == GalleryService.FavoritesFolderId,
-            });
-        }
-
-        foreach (var album in albums.Where(a => a.Count > 0))
-            Folders.Add(new FolderChip(album.Id, $"{album.Name} · {album.Count}") { IsSelected = album.Id == _selectedFolderId });
-
-        // Selected folder disappeared (e.g. emptied) → fall back to All.
-        if (_selectedFolderId is not null && !Folders.Any(f => f.IsSelected))
-        {
-            _selectedFolderId = null;
-            all.IsSelected = true;
-        }
+        foreach (var chip in filter.Chips)
+            Folders.Add(new FolderChip(chip.FolderId, chip.Label) { IsSelected = chip.IsSelected });
     }
 
     [RelayCommand]

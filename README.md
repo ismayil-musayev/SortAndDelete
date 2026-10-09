@@ -134,7 +134,7 @@ on iOS.
 ## Build, test, run
 
 ```bash
-dotnet test                                # 210 unit tests
+dotnet test                                # 264 unit tests
 dotnet build -f net10.0-android -t:Run     # Android (device/emulator attached)
 dotnet build -f net10.0-ios -t:Run         # iOS (needs a Mac)
 ```

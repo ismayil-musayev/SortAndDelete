@@ -528,17 +528,14 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             }
         }
 
-        var albums = byPath
-            .Select(kv => new AlbumInfo
-            {
-                Id = kv.Key,
-                Name = kv.Key.TrimEnd('/').Split('/').Last(),
-                Count = kv.Value,
-                Subtitle = kv.Key,
-            })
-            .OrderBy(a => a.Name, StringComparer.CurrentCultureIgnoreCase)
-            .ThenBy(a => a.Id, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        // Items at the top of the storage ("/") show as "Main storage", listed first.
+        var albums = FolderFilter.InDisplayOrder(byPath.Select(kv => new AlbumInfo
+        {
+            Id = kv.Key,
+            Name = FolderFilter.NameFor(kv.Key),
+            Count = kv.Value,
+            Subtitle = kv.Key,
+        }));
 
         // Folders the user picked with the system browser (anywhere on the device).
         albums.AddRange(GetSavedSafAlbums());

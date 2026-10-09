@@ -10,7 +10,7 @@ namespace SortAndDelete.Services;
 public sealed class GalleryService(IPhotoLibraryService library, ReviewStore store)
 {
     /// <summary>Pseudo-folder id for the system-wide favorites flag (Samsung/Google "Favourites").</summary>
-    public const string FavoritesFolderId = "sortanddelete:favorites";
+    public const string FavoritesFolderId = FolderFilter.FavoritesFolderId;
 
     private List<PhotoAsset>? _photos;
     private Dictionary<string, PhotoAsset>? _byId;
@@ -66,10 +66,8 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
         return photos.Where(p => members.Contains(p.Id)).ToList();
     }
 
-    public async Task<List<MonthGroup>> GetMonthGroupsAsync(bool refresh = false, string? folderId = null)
+    public async Task<List<MonthGroup>> GetMonthGroupsAsync(string? folderId = null)
     {
-        if (refresh)
-            await GetPhotosAsync(refresh: true);
         var photos = await GetPhotosAsync(folderId);
         var reviewedIds = await GetReviewedIdsAsync();
         return MonthAggregator.Build(photos, reviewedIds);
