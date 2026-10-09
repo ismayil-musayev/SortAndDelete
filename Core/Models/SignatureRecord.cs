@@ -105,20 +105,46 @@ public sealed class ContentHashRecord
 
     public long SizeBytes { get; set; }
 
+    /// <summary>
+    /// The item's <see cref="PhotoAsset.FileModifiedAt"/> when it was hashed. 0 where that isn't
+    /// tracked (iOS), and for rows hashed before this column existed, which read back as 0 too.
+    /// </summary>
+    public long FileModifiedAtTicks { get; set; }
+
     public string Hash { get; set; } = "";
 
     public static ContentHashRecord From(PhotoAsset photo, string hash) => new()
     {
         PhotoId = photo.Id,
         SizeBytes = photo.SizeBytes,
+        FileModifiedAtTicks = photo.FileModifiedAt.Ticks,
         Hash = hash,
     };
 
     /// <summary>
-    /// Whether this hash still describes the file. Size alone, on purpose: the hash is of the
-    /// untouched original, which an iOS edit never changes (<see cref="PhotoAsset.IsEdited"/>
-    /// is what keeps an edited item out of the exact tier), while the modification time also
-    /// moves on metadata changes like favouriting and would re-read whole originals for nothing.
+    /// Whether this hash still describes the file: the size, and the file's stamp where the row
+    /// has one. An Android edit such as a rotation rewrites the file in place and can keep its
+    /// size, so only the stamp shows it.
     /// </summary>
-    public bool IsCurrentFor(PhotoAsset photo) => SizeBytes == photo.SizeBytes;
+    /// <remarks>
+    /// Not <see cref="PhotoAsset.ModifiedAt"/>: on iOS the hash is of the untouched original,
+    /// which an edit never changes (<see cref="PhotoAsset.IsEdited"/> is what keeps an edited item
+    /// out of the exact tier), while that time also moves on metadata changes like favouriting and
+    /// would re-read whole originals for nothing. A row without a stamp goes by size alone: an iOS
+    /// row never has one, and one hashed before stamping is adopted rather than read again, so an
+    /// update doesn't re-read every file that shares a size with another. Only those that could
+    /// make an identical pair are read again (<see cref="Logic.HashAdoption"/>).
+    /// </remarks>
+    public bool IsCurrentFor(PhotoAsset photo) =>
+        SizeBytes == photo.SizeBytes
+        && (FileModifiedAtTicks == 0 || FileModifiedAtTicks == photo.FileModifiedAt.Ticks);
+
+    /// <summary>
+    /// Whether this row is current but unstamped while the item has a stamp to give it. Saved again
+    /// stamped (<see cref="From"/>), it notices an in-place edit from then on; left as it is, it
+    /// would be taken at its word for good. Whether it is adopted or read again is
+    /// <see cref="Logic.HashAdoption"/>'s call.
+    /// </summary>
+    public bool NeedsStampFrom(PhotoAsset photo) =>
+        FileModifiedAtTicks == 0 && photo.FileModifiedAt.Ticks != 0 && IsCurrentFor(photo);
 }

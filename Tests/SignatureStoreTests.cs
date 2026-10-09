@@ -10,6 +10,9 @@ public sealed class SignatureStoreTests : IDisposable
 {
     private static readonly DateTime Taken = new(2026, 7, 1, 12, 0, 0);
 
+    /// <summary>The file's stamp, as Android's DATE_MODIFIED gives it.</summary>
+    private static readonly DateTime Written = new(2026, 7, 1, 12, 0, 5, DateTimeKind.Utc);
+
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"sortanddelete_test_{Guid.NewGuid():N}.db3");
 
     public void Dispose()
@@ -61,12 +64,13 @@ public sealed class SignatureStoreTests : IDisposable
         public string Hash { get; set; } = "";
     }
 
-    private static PhotoAsset Photo(DateTime modifiedAt = default) => new()
+    private static PhotoAsset Photo(DateTime modifiedAt = default, DateTime fileModifiedAt = default) => new()
     {
         Id = "42",
         SizeBytes = 5_000_000,
         TakenAt = Taken,
         ModifiedAt = modifiedAt,
+        FileModifiedAt = fileModifiedAt,
     };
 
     private static ImageSignature Signature() => new()
@@ -115,8 +119,7 @@ public sealed class SignatureStoreTests : IDisposable
     /// <summary>
     /// Opening a 3.0 cache has to add the fingerprints' column without losing a row, and those
     /// rows have to read back as untracked so they stay current for an Android photo. Otherwise
-    /// every Android user would sit through a full rescan after updating. The content hashes
-    /// gain nothing and come back as they were.
+    /// every Android user would sit through a full rescan after updating.
     /// </summary>
     [Fact]
     public async Task Rows_cached_before_the_upgrade_stay_current_for_an_untracked_photo()
@@ -125,19 +128,51 @@ public sealed class SignatureStoreTests : IDisposable
         var store = new SignatureStore(_dbPath);
 
         var signature = Assert.Single((await store.GetSignaturesAsync())["42"]);
-        var hash = (await store.GetContentHashesAsync())["42"];
 
         // Added rather than just missing, so the zero below is the old row's NULL read back.
         Assert.Contains(nameof(SignatureRecord.ModifiedAtTicks), ColumnsOf("signatures"));
         Assert.Equal(0, signature.ModifiedAtTicks);
         Assert.True(signature.IsCurrentFor(Photo()));
         Assert.Equal(0x1234UL, signature.ToSignature().DHash);
+    }
 
-        Assert.Equal(["PhotoId", "SizeBytes", "Hash"], ColumnsOf("content_hashes"));
+    /// <summary>
+    /// The content hashes gain the file's stamp the same way, and a row hashed before then
+    /// reads back unstamped and current, whatever stamp the file has now. Otherwise every
+    /// Android user would re-read each file that shares a size with another after updating.
+    /// </summary>
+    [Fact]
+    public async Task Hashes_cached_before_the_upgrade_read_back_unstamped_and_current()
+    {
+        CreateCacheAs30LeftIt();
+        var store = new SignatureStore(_dbPath);
+
+        var hash = (await store.GetContentHashesAsync())["42"];
+
+        // Added rather than just missing, so the zero below is the old row's NULL read back.
+        Assert.Contains(nameof(ContentHashRecord.FileModifiedAtTicks), ColumnsOf("content_hashes"));
+        Assert.Equal(0, hash.FileModifiedAtTicks);
         Assert.Equal("42", hash.PhotoId);
         Assert.Equal(5_000_000, hash.SizeBytes);
         Assert.Equal("ABC", hash.Hash);
         Assert.True(hash.IsCurrentFor(Photo()));
+        Assert.True(hash.IsCurrentFor(Photo(fileModifiedAt: Written)));
+    }
+
+    [Fact]
+    public async Task An_upgraded_cache_keeps_the_stamp_of_new_hashes()
+    {
+        CreateCacheAs30LeftIt();
+        var store = new SignatureStore(_dbPath);
+        var stamped = Photo(fileModifiedAt: Written);
+
+        await store.SaveContentHashesAsync([ContentHashRecord.From(stamped, "DEF")]);
+
+        var hash = (await store.GetContentHashesAsync())["42"];
+        Assert.Equal(Written.Ticks, hash.FileModifiedAtTicks);
+        Assert.Equal("DEF", hash.Hash);
+        Assert.True(hash.IsCurrentFor(stamped));
+        Assert.False(hash.IsCurrentFor(Photo(fileModifiedAt: Written.AddMinutes(1))));
     }
 
     [Fact]

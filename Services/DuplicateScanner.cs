@@ -77,6 +77,22 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
                 videosToRead.Add(video);
         }
 
+        // Hashes cached before files carried a stamp. One that could make an identical pair is
+        // read again, as its file may have been rotated since; dropped here, it is hashed below
+        // and doesn't count if that fails. The rest keep their value and take the file's stamp.
+        var adoption = HashAdoption.For(sizeCollisions, contentHashes);
+        foreach (var photo in adoption.Reread)
+            contentHashes.Remove(photo.Id);
+
+        try
+        {
+            await store.SaveContentHashesAsync(adoption.Adopted);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // only an optimisation: the rows stay unstamped, and are adopted again next scan
+        }
+
         var toHash = sizeCollisions
             .Where(p => !(contentHashes.TryGetValue(p.Id, out var row) && row.IsCurrentFor(p)))
             .ToList();
@@ -151,8 +167,19 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             await AdvanceAsync("Checking for identical files");
         });
 
-        await FlushAsync(force: true);
-        await store.SaveContentHashesAsync(freshHashes);
+        // Stopping keeps what was read, so the next scan picks up from there. A save failing on
+        // the way out mustn't turn the stop into an error.
+        try
+        {
+            await FlushAsync(force: true);
+            await store.SaveContentHashesAsync(freshHashes);
+        }
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            // stopping anyway; what didn't save is read again next time
+        }
+
+        ct.ThrowIfCancellationRequested();
         await store.ForgetMissingAsync(photos.Select(p => p.Id).ToHashSet(StringComparer.Ordinal));
 
         return Assemble(photos, signatures, frames, contentHashes);
@@ -250,35 +277,51 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
                 : null,
         })];
 
+    /// <summary>
+    /// Runs <paramref name="work"/> over the items, <paramref name="concurrency"/> workers each
+    /// taking the next until none are left or the scan is stopped. Stopped, it returns once the
+    /// items under way have finished instead of throwing: the scan still saves what was read,
+    /// then throws itself. Workers, not a task per item waiting its turn, which a stop would
+    /// wake one by one on the UI thread just to throw.
+    /// </summary>
     private static async Task RunAsync<T>(
         IReadOnlyList<T> items, int concurrency, CancellationToken ct, Func<T, Task> work)
     {
         if (items.Count == 0)
             return;
 
-        using var gate = new SemaphoreSlim(concurrency);
-        var running = items.Select(async item =>
+        int next = -1;
+        var workers = Enumerable.Range(0, Math.Min(concurrency, items.Count)).Select(async _ =>
         {
-            await gate.WaitAsync(ct);
             try
             {
-                await work(item);
+                while (!ct.IsCancellationRequested)
+                {
+                    int index = Interlocked.Increment(ref next);
+                    if (index >= items.Count)
+                        return;
+
+                    try
+                    {
+                        await work(items[index]);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch
+                    {
+                        // One unreadable item must not take the scan down with it; it simply ends up
+                        // without a fingerprint and never matches anything.
+                    }
+                }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                throw;
-            }
-            catch
-            {
-                // One unreadable item must not take the scan down with it; it simply ends up
-                // without a fingerprint and never matches anything.
-            }
-            finally
-            {
-                gate.Release();
+                // stopped; see above
             }
         });
 
-        await Task.WhenAll(running);
+        await Task.WhenAll(workers);
     }
 }
