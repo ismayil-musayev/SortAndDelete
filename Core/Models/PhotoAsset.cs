@@ -17,6 +17,23 @@ public sealed class PhotoAsset
     /// <summary>Local time the item was taken (falls back to file time when EXIF is absent).</summary>
     public DateTime TakenAt { get; init; }
 
+    /// <summary>
+    /// The platform's last-modification time, in UTC (iOS PHAsset.modificationDate), filled
+    /// where an edit can leave the size and capture date unchanged. It also moves on
+    /// metadata-only changes such as favouriting. Android leaves it unset and relies on size
+    /// and capture date, as before. <see cref="DateTime.MinValue"/>, the default, means not
+    /// tracked.
+    /// </summary>
+    public DateTime ModifiedAt { get; init; }
+
+    /// <summary>
+    /// True when an edit is kept beside the untouched original (iOS PHAsset.hasAdjustments), so
+    /// the original's bytes no longer show what the item looks like and it can never be an
+    /// identical file of anything. Always false on Android, where an edit rewrites the file
+    /// itself.
+    /// </summary>
+    public bool IsEdited { get; init; }
+
     /// <summary>File size in bytes. 0 when unknown (iOS defers the lookup); settable so it can be filled lazily.</summary>
     public long SizeBytes { get; set; }
 

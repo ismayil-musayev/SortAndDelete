@@ -47,7 +47,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
         var sizeCollisions = ItemsSharingAByteLength(photos);
 
         var signatures = new Dictionary<string, ImageSignature>(StringComparer.Ordinal);
-        var frames = new Dictionary<string, List<ImageSignature>>(StringComparer.Ordinal);
+        var frames = new Dictionary<string, IReadOnlyList<ImageSignature?>>(StringComparer.Ordinal);
 
         // Reuse whatever is still valid before deciding what is left to do.
         var stillsToRead = new List<PhotoAsset>();
@@ -78,7 +78,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
         }
 
         var toHash = sizeCollisions
-            .Where(p => !(contentHashes.TryGetValue(p.Id, out var row) && row.SizeBytes == p.SizeBytes))
+            .Where(p => !(contentHashes.TryGetValue(p.Id, out var row) && row.IsCurrentFor(p)))
             .ToList();
 
         int total = stillsToRead.Count
@@ -111,24 +111,24 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
 
         await RunAsync(videosToRead, Concurrency, ct, async video =>
         {
-            var sampled = new List<ImageSignature>();
-            for (int frame = 0; frame < VideoFingerprint.SamplePositions.Length; frame++)
+            var sampled = await VideoFingerprint.SampleAsync(async frame =>
             {
                 var pixels = await library.GetVideoFramePixelsAsync(
                     video.Id, VideoFingerprint.SamplePositions[frame], SignatureBuilder.GridSize, ct);
 
+                ImageSignature? signature = null;
                 if (pixels is { Length: SignatureBuilder.ExpectedLength })
                 {
-                    var signature = SignatureBuilder.Build(pixels);
-                    sampled.Add(signature);
+                    signature = SignatureBuilder.Build(pixels);
                     lock (signatures)
                         pending.Add(SignatureRecord.From(video.Id, frame, video, signature));
                 }
 
                 await AdvanceAsync("Sampling videos");
-            }
+                return signature;
+            });
 
-            if (sampled.Count > 0)
+            if (sampled.Any(slot => slot is not null))
             {
                 lock (signatures)
                     frames[video.Id] = sampled;
@@ -141,7 +141,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             var hash = await library.ComputeContentHashAsync(photo.Id, ct);
             if (hash is not null)
             {
-                var record = new ContentHashRecord { PhotoId = photo.Id, SizeBytes = photo.SizeBytes, Hash = hash };
+                var record = ContentHashRecord.From(photo, hash);
                 lock (freshHashes)
                 {
                     freshHashes.Add(record);
@@ -219,10 +219,12 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
     /// <summary>
     /// Items sharing an exact byte length with another. Byte-identical files must land here,
     /// so hashing this set alone finds every exact duplicate without reading the whole library.
+    /// Edited items are left out: they can never be an identical file, and as iOS won't hash
+    /// them they would come up again on every scan, which would then never be up to date.
     /// </summary>
     private static List<PhotoAsset> ItemsSharingAByteLength(IReadOnlyList<PhotoAsset> photos) =>
         [.. photos
-            .Where(p => p.SizeBytes > 0)
+            .Where(p => p.SizeBytes > 0 && !p.IsEdited)
             .GroupBy(p => p.SizeBytes)
             .Where(group => group.Count() > 1)
             .SelectMany(group => group)];
@@ -230,7 +232,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
     private static List<ScannedPhoto> Assemble(
         IReadOnlyList<PhotoAsset> photos,
         Dictionary<string, ImageSignature> signatures,
-        Dictionary<string, List<ImageSignature>> frames,
+        Dictionary<string, IReadOnlyList<ImageSignature?>> frames,
         Dictionary<string, ContentHashRecord> contentHashes) =>
         [.. photos.Select(photo => new ScannedPhoto
         {
@@ -238,8 +240,12 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             Signature = signatures.GetValueOrDefault(photo.Id),
             Frames = frames.GetValueOrDefault(photo.Id),
 
-            // A hash from a different file length describes a file that has since changed.
-            ContentHash = contentHashes.TryGetValue(photo.Id, out var row) && row.SizeBytes == photo.SizeBytes
+            // A hash from a different file length describes a file that has since changed, and an
+            // edited item's describes an original it no longer looks like. Its row is kept, so
+            // reverting the edit costs no second read.
+            ContentHash = !photo.IsEdited
+                && contentHashes.TryGetValue(photo.Id, out var row)
+                && row.IsCurrentFor(photo)
                 ? row.Hash
                 : null,
         })];

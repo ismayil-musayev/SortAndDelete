@@ -20,12 +20,19 @@ public sealed class SignatureRecord
     public int FrameIndex { get; set; }
 
     /// <summary>
-    /// Change token. Ids get reused when a file is replaced in place, so a fingerprint is
-    /// only trusted while the size and capture date it was taken from still hold.
+    /// Change token. Ids get reused when a file is replaced in place, and an iOS edit leaves
+    /// the original's size and capture date alone, so a fingerprint is only trusted while the
+    /// size, capture date and modification time it was taken from still hold.
     /// </summary>
     public long SizeBytes { get; set; }
 
     public long TakenAtTicks { get; set; }
+
+    /// <summary>
+    /// 0 where the platform doesn't track modification. Rows cached before this column existed
+    /// read back as 0 too, so on Android, which never tracks it, an upgrade keeps the cache.
+    /// </summary>
+    public long ModifiedAtTicks { get; set; }
 
     // Hashes are unsigned but SQLite integers are signed, so they round-trip through an
     // unchecked cast — same 64 bits, reinterpreted.
@@ -52,6 +59,7 @@ public sealed class SignatureRecord
         FrameIndex = frameIndex,
         SizeBytes = photo.SizeBytes,
         TakenAtTicks = photo.TakenAt.Ticks,
+        ModifiedAtTicks = photo.ModifiedAt.Ticks,
         DHash = unchecked((long)signature.DHash),
         DHash90 = unchecked((long)signature.DHash90),
         DHash180 = unchecked((long)signature.DHash180),
@@ -80,7 +88,9 @@ public sealed class SignatureRecord
 
     /// <summary>Whether this fingerprint still describes the file it was taken from.</summary>
     public bool IsCurrentFor(PhotoAsset photo) =>
-        SizeBytes == photo.SizeBytes && TakenAtTicks == photo.TakenAt.Ticks;
+        SizeBytes == photo.SizeBytes
+        && TakenAtTicks == photo.TakenAt.Ticks
+        && ModifiedAtTicks == photo.ModifiedAt.Ticks;
 }
 
 /// <summary>
@@ -96,4 +106,19 @@ public sealed class ContentHashRecord
     public long SizeBytes { get; set; }
 
     public string Hash { get; set; } = "";
+
+    public static ContentHashRecord From(PhotoAsset photo, string hash) => new()
+    {
+        PhotoId = photo.Id,
+        SizeBytes = photo.SizeBytes,
+        Hash = hash,
+    };
+
+    /// <summary>
+    /// Whether this hash still describes the file. Size alone, on purpose: the hash is of the
+    /// untouched original, which an iOS edit never changes (<see cref="PhotoAsset.IsEdited"/>
+    /// is what keeps an edited item out of the exact tier), while the modification time also
+    /// moves on metadata changes like favouriting and would re-read whole originals for nothing.
+    /// </summary>
+    public bool IsCurrentFor(PhotoAsset photo) => SizeBytes == photo.SizeBytes;
 }

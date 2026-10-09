@@ -5,11 +5,19 @@ namespace SortAndDelete.Tests;
 
 public class SignatureRecordTests
 {
-    private static PhotoAsset Photo(long size = 5_000_000, string takenAt = "2026-07-01T12:00:00") => new()
+    // Modification times as iOS reports them, in UTC.
+    private static readonly DateTime Imported = new(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime Edited = new(2026, 8, 15, 9, 30, 0, DateTimeKind.Utc);
+
+    private static PhotoAsset Photo(
+        long size = 5_000_000,
+        string takenAt = "2026-07-01T12:00:00",
+        DateTime modifiedAt = default) => new()
     {
         Id = "42",
         SizeBytes = size,
         TakenAt = DateTime.Parse(takenAt),
+        ModifiedAt = modifiedAt,
     };
 
     private static ImageSignature Signature(ulong seed) => new()
@@ -64,11 +72,67 @@ public class SignatureRecordTests
         Assert.False(record.IsCurrentFor(Photo(takenAt: "2020-01-01T00:00:00")));
     }
 
+    /// <summary>
+    /// An iOS edit leaves the original alone, so its size and capture date both still hold and
+    /// only the modification time shows that the picture changed.
+    /// </summary>
+    [Fact]
+    public void A_fingerprint_goes_stale_when_the_item_is_edited()
+    {
+        var record = SignatureRecord.From("42", 0, Photo(modifiedAt: Imported), Signature(1));
+
+        Assert.True(record.IsCurrentFor(Photo(modifiedAt: Imported)));
+        Assert.False(record.IsCurrentFor(Photo(modifiedAt: Edited)));
+    }
+
+    /// <summary>
+    /// Android never sets a modification time, and a row cached before there was one reads
+    /// back as 0. The two have to keep matching, or every upgrade would throw the cache away.
+    /// </summary>
+    [Fact]
+    public void A_record_without_a_modification_time_is_current_for_an_untracked_photo()
+    {
+        var photo = Photo();
+        var cachedBeforeTracking = new SignatureRecord
+        {
+            Key = "42",
+            PhotoId = "42",
+            SizeBytes = photo.SizeBytes,
+            TakenAtTicks = photo.TakenAt.Ticks,
+            ModifiedAtTicks = 0,
+        };
+
+        Assert.True(cachedBeforeTracking.IsCurrentFor(photo));
+    }
+
     [Fact]
     public void Video_frames_are_stored_apart_from_each_other()
     {
         Assert.Equal("42", SignatureRecord.KeyFor("42", 0));
         Assert.Equal("42#1", SignatureRecord.KeyFor("42", 1));
         Assert.NotEqual(SignatureRecord.KeyFor("42", 1), SignatureRecord.KeyFor("42", 2));
+    }
+
+    // ---------- Content hashes ----------
+
+    [Fact]
+    public void A_content_hash_goes_stale_when_the_file_changes_under_it()
+    {
+        var record = ContentHashRecord.From(Photo(size: 5_000_000), "ABC");
+
+        Assert.True(record.IsCurrentFor(Photo(size: 5_000_000)));
+        Assert.False(record.IsCurrentFor(Photo(size: 4_000_000)));
+    }
+
+    /// <summary>
+    /// The hash is of the untouched original, which favouriting and other metadata changes
+    /// leave alone. Expiring it then would re-read the whole original, perhaps from iCloud.
+    /// </summary>
+    [Fact]
+    public void A_content_hash_outlasts_a_metadata_change()
+    {
+        var record = ContentHashRecord.From(Photo(modifiedAt: Imported), "ABC");
+
+        Assert.True(record.IsCurrentFor(Photo(modifiedAt: Imported.AddDays(1))));
     }
 }

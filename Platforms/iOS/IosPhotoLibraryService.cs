@@ -57,6 +57,12 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
                 ? ((DateTime)date).ToLocalTime()
                 : DateTime.MinValue;
 
+            // Kept in UTC, unlike takenAt: it only has to notice that the item changed, and a
+            // change of time zone isn't one.
+            var modifiedAt = asset.ModificationDate is NSDate modified
+                ? (DateTime)modified
+                : DateTime.MinValue;
+
             bool isVideo = mediaType == PHAssetMediaType.Video;
 
             string fileName = "";
@@ -76,6 +82,8 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
                 Id = asset.LocalIdentifier,
                 Kind = isVideo ? MediaKind.Video : MediaKind.Image,
                 TakenAt = takenAt,
+                ModifiedAt = modifiedAt,
+                IsEdited = asset.HasAdjustments,
                 SizeBytes = 0, // looked up lazily via GetFileSizeAsync — too slow to do for every asset
                 Width = (int)asset.PixelWidth,
                 Height = (int)asset.PixelHeight,

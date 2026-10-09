@@ -21,10 +21,19 @@ public sealed class SignatureStore
             SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create | SQLiteOpenFlags.SharedCache);
     }
 
-    private Task InitAsync() => _init ??= InitCoreAsync();
+    private Task InitAsync()
+    {
+        // Opening writes now (the migration), so a failure such as a full disk is retried, not kept.
+        if (_init is { IsFaulted: true })
+            _init = null;
+        return _init ??= InitCoreAsync();
+    }
 
     private async Task InitCoreAsync()
     {
+        // Also the migration: a column a record has gained is added to the existing table. Old
+        // rows hold NULL in it, which sqlite-net reads back as 0. It can't be [NotNull]: SQLite
+        // won't add a NOT NULL column without a default.
         await _db.CreateTableAsync<SignatureRecord>();
         await _db.CreateTableAsync<ContentHashRecord>();
     }

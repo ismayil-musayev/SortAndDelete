@@ -44,7 +44,7 @@ public static class DuplicateGrouper
         var firstWithHash = new Dictionary<string, int>(StringComparer.Ordinal);
         for (int i = 0; i < items.Count; i++)
         {
-            if (items[i].ContentHash is not { } hash)
+            if (TrustedHash(items[i]) is not { } hash)
                 continue;
 
             if (firstWithHash.TryGetValue(hash, out int first))
@@ -257,8 +257,8 @@ public static class DuplicateGrouper
         var photos = members.Select(m => m.Photo).ToList();
         var keeper = KeeperRanking.Best(photos);
 
-        bool isExact = members[0].ContentHash is { } first
-            && members.All(m => string.Equals(m.ContentHash, first, StringComparison.Ordinal));
+        bool isExact = TrustedHash(members[0]) is { } first
+            && members.All(m => string.Equals(TrustedHash(m), first, StringComparison.Ordinal));
 
         return new DuplicateGroup
         {
@@ -267,6 +267,13 @@ public static class DuplicateGrouper
             IsExact = isExact,
         };
     }
+
+    /// <summary>
+    /// The item's byte hash, unless it is edited: then the hash is of an original it no longer
+    /// looks like, and can't make it an identical file of anything.
+    /// </summary>
+    private static string? TrustedHash(ScannedPhoto item) =>
+        item.Photo.IsEdited ? null : item.ContentHash;
 
     /// <summary>The <paramref name="band"/>-th equal slice of the hash, of <paramref name="bands"/> total.</summary>
     private static ulong BandKey(ulong hash, int band, int bands)

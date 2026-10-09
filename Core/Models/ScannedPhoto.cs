@@ -12,16 +12,20 @@ public sealed class ScannedPhoto
     public ImageSignature? Signature { get; init; }
 
     /// <summary>
-    /// Fingerprints of frames sampled across a video, in <c>VideoFingerprint.SamplePositions</c>
-    /// order. Null for stills, and null for videos whose duration is unique in the library —
-    /// nothing else is the same length, so nothing can be a re-encode of it and pulling frames
-    /// out would be wasted work.
+    /// Fingerprints of frames sampled across a video: one slot per
+    /// <c>VideoFingerprint.SamplePositions</c> entry, in that order, null where that frame
+    /// couldn't be read. The gap is kept so two clips' frames still pair up by position. Null
+    /// for stills, for a clip with no readable frame, and for videos whose duration is unique in
+    /// the library — nothing else is the same length, so nothing can be a re-encode of it and
+    /// pulling frames out would be wasted work.
     /// </summary>
-    public IReadOnlyList<ImageSignature>? Frames { get; init; }
+    public IReadOnlyList<ImageSignature?>? Frames { get; init; }
 
     /// <summary>
     /// Hash of the file bytes, or null when it was never computed. Only items sharing an exact
-    /// byte length are hashed, since nothing else can possibly be byte-identical.
+    /// byte length are hashed, since nothing else can possibly be byte-identical. The scan leaves
+    /// it null for an edited item (<see cref="PhotoAsset.IsEdited"/>), and grouping ignores one
+    /// regardless.
     /// </summary>
     public string? ContentHash { get; init; }
 }
