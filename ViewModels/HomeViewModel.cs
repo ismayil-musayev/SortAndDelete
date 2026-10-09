@@ -92,6 +92,10 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     // Completes when the latest load has ended.
     private Task _loadEnded = Task.CompletedTask;
 
+    // Whether the latest load's access request found the library usable. Set only there, so it
+    // is false until a load has asked; HasAccess starts true, for the page before any load.
+    private bool _accessGranted;
+
     private async Task LoadAsync()
     {
         if (_loadInProgress)
@@ -104,6 +108,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         try
         {
             HasAccess = await gallery.Library.RequestAccessAsync();
+            _accessGranted = HasAccess;
             IsLimitedAccess = HasAccess && await gallery.Library.HasLimitedAccessAsync();
             if (!HasAccess)
             {
@@ -194,6 +199,21 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     public async Task ReloadAsync()
     {
         await _loadEnded;
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Loads the page again after the library changed outside it, in another app or while the app
+    /// was in the background: as <see cref="ReloadAsync"/> does, but only when the load in progress,
+    /// or else the latest one, found photo access. A load asks for access when there is none, and
+    /// a reload the user didn't ask for must not: after "Don't allow", a second "Don't allow" is
+    /// for good.
+    /// </summary>
+    public async Task ReloadAfterLibraryChangeAsync()
+    {
+        await _loadEnded;
+        if (!_accessGranted)
+            return;
         await LoadAsync();
     }
 
