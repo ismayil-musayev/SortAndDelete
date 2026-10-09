@@ -12,8 +12,24 @@
       obfuscation.cfg                  app-owned rules
       proguard_obfuscation.cfg (obj)   what the task appends to its copy, plus keeps for what
                                        JNI reaches that the SDK's rules leave out (below)
-    and make sure every AAR's consumer rules are in the list. The last target works around an
-    SDK packaging bug that is independent of R8.
+    and make sure every AAR's consumer rules and aapt2's keep rules are in the list, which the SDK
+    can leave out of incremental builds. One target works around an SDK packaging bug that is
+    independent of R8.
+
+    The build fails closed: anything that could ship a crashing or unobfuscated app is an error.
+      SD0001  the SDK's R8 rules no longer match the project copy (after an SDK update)
+      SD0002  the SDK's proguard_xamarin.cfg (-dontobfuscate) is still passed to R8
+      SD0003  the SDK's keep files could not be parsed, so the generated keeps are missing
+      SD0004  a listed jar is missing or unreadable, so its ServiceLoader providers are unknown
+      SD0005  R8's output renames a name the app looks up at runtime (stale dex or missing keep)
+      SD0006  R8 renamed almost nothing: obfuscation is effectively off
+      SD0007  the signed package lacks META-INF/services files the app's jars provide
+      SD0008  AAR consumer rules are not passed to R8
+      SD0009  the SDK's R8 rules file is missing after R8, so SD0001 cannot run
+      SD0010  R8 writes no mapping file, so its output can't be verified or deobfuscated
+      SD0011  keep rules R8 must get are missing from its configuration
+    SD0005 to SD0007 check outputs (mapping.txt, the signed package), so they hold even if the SDK
+    renames a target this file hooks into and a hook silently stops running.
   -->
 
   <!-- Writes the generated rules. The SDK's keeps (proguard_project_references.cfg for the bound
@@ -105,8 +121,14 @@
         foreach (var item in JavaLibraries ?? new ITaskItem[0])
         {
             var jar = item.GetMetadata("FullPath");
-            if (!jar.EndsWith(".jar", StringComparison.OrdinalIgnoreCase) || !jars.Add(jar) || !File.Exists(jar))
+            if (!jar.EndsWith(".jar", StringComparison.OrdinalIgnoreCase) || !jars.Add(jar))
                 continue;
+            if (!File.Exists(jar))
+            {
+                Log.LogError(null, "SD0004", null, jar, 0, 0, 0, 0,
+                    "R8 obfuscation: this jar is listed for the app but does not exist, so its META-INF/services providers cannot be kept. A provider R8 renames or removes is one ServiceLoader cannot find, which crashes the app at runtime. Rebuild with -t:Rebuild (it re-extracts library jars), or remove the reference to the jar, then build again.");
+                continue;
+            }
             try
             {
                 using (var zip = new ZipArchive(File.OpenRead(jar), ZipArchiveMode.Read))
@@ -130,7 +152,7 @@
                     }
                 }
             }
-            catch (InvalidDataException e)
+            catch (Exception e) when (e is InvalidDataException || e is IOException || e is UnauthorizedAccessException || e is NotSupportedException)
             {
                 Log.LogError(null, "SD0004", null, jar, 0, 0, 0, 0,
                     "R8 obfuscation: could not read this jar to keep its META-INF/services providers ({0}). A provider R8 renames or removes is one ServiceLoader cannot find, which crashes the app at runtime. Restore or replace the jar (a clean Release build re-extracts AAR jars), then build again.",
@@ -192,18 +214,484 @@
     </Task>
   </UsingTask>
 
-  <Target Name="_SdUseObfuscatingXamarinRules"
-          AfterTargets="_CalculateProguardConfigurationFiles"
-          Condition=" '$(AndroidLinkTool)' == 'r8' ">
+  <!-- Checks the list of config files R8 is about to get: the keep rules it must get (SD0011), the
+       SDK's -dontobfuscate file it must not get (SD0002), and the AAR consumer rules (SD0008). -->
+  <UsingTask TaskName="SdCheckR8Configuration" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Configuration ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <Required ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <Forbidden ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <ExtractedDirectories ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <ImportsDirectoryName ParameterType="System.String" />
+      <AarLibraries ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <AllowNoAarConsumerRules ParameterType="System.Boolean" />
+    </ParameterGroup>
+    <Task>
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        var passed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var aarRulesPassed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in Configuration ?? new ITaskItem[0])
+        {
+            passed.Add(item.GetMetadata("FullPath"));
+            if (item.GetMetadata("OriginalFile").EndsWith(".aar", StringComparison.OrdinalIgnoreCase))
+                aarRulesPassed.Add(item.GetMetadata("FullPath"));
+        }
+
+        var missing = (Required ?? new ITaskItem[0]).Where(i => !passed.Contains(i.GetMetadata("FullPath"))).Select(i => i.ItemSpec).ToList();
+        if (missing.Count > 0)
+            Log.LogError(null, "SD0011", null, null, 0, 0, 0, 0,
+                "R8 obfuscation: R8 would not get these keep rules: {0}. Without them R8 renames or removes Java code the app reaches by name, and the obfuscated app crashes at runtime. Rebuild with -t:Rebuild; if this persists, either _SdUseObfuscatingXamarinRules in Platforms\\Android\\R8\\R8Obfuscation.targets did not run, or the .NET Android SDK now lists R8's config files differently: update R8Obfuscation.targets for this SDK, then build again.",
+                string.Join("; ", missing));
+
+        foreach (var item in Forbidden ?? new ITaskItem[0])
+            if (passed.Contains(item.GetMetadata("FullPath")))
+                Log.LogError(null, "SD0002", null, null, 0, 0, 0, 0,
+                    "R8 obfuscation is OFF: the SDK's proguard_xamarin.cfg (with -dontobfuscate) is still passed to R8 ('{0}'). Either _SdUseObfuscatingXamarinRules in Platforms\\Android\\R8\\R8Obfuscation.targets did not run, or its Remove no longer matches how the SDK lists the file; update it, then build again.",
+                    item.ItemSpec);
+
+        // An AAR's consumer rules are extracted to <extracted directory>\jl\proguard.txt.
+        var importsDirectory = string.IsNullOrEmpty(ImportsDirectoryName) ? "jl" : ImportsDirectoryName;
+        var aars = (AarLibraries ?? new ITaskItem[0]).Length;
+        var notPassed = new List<string>();
+        foreach (var directory in ExtractedDirectories ?? new ITaskItem[0])
+        {
+            if (directory.GetMetadata("OriginalFile").EndsWith(".aar", StringComparison.OrdinalIgnoreCase))
+                aars++;
+            var rules = Path.Combine(directory.GetMetadata("FullPath"), importsDirectory, "proguard.txt");
+            if (!File.Exists(rules))
+                continue;
+            if (passed.Contains(Path.GetFullPath(rules)))
+                aarRulesPassed.Add(Path.GetFullPath(rules));
+            else
+                notPassed.Add(rules);
+        }
+        if (notPassed.Count > 0)
+            Log.LogError(null, "SD0008", null, null, 0, 0, 0, 0,
+                "R8 obfuscation: {0} AAR consumer rule file(s) are not passed to R8: {1}. R8 would then rename or remove classes those libraries reach by name, and the app could crash at runtime. Rebuild with -t:Rebuild; if this persists, update the AAR rules re-add in Platforms\\Android\\R8\\R8Obfuscation.targets for this SDK.",
+                notPassed.Count, string.Join("; ", notPassed.Take(10)) + (notPassed.Count > 10 ? "; ..." : ""));
+        if (aars > 0 && aarRulesPassed.Count == 0 && !AllowNoAarConsumerRules)
+            Log.LogError(null, "SD0008", null, null, 0, 0, 0, 0,
+                "R8 obfuscation: the app uses {0} AAR(s) but none of their consumer rules (proguard.txt) is passed to R8, so R8 would rename or remove classes those libraries reach by name. The .NET Android SDK may now extract AARs elsewhere: update the AAR rules re-add in Platforms\\Android\\R8\\R8Obfuscation.targets. If really none of the app's AARs ships consumer rules, set SdAllowNoAarConsumerRules to true.",
+                aars);
+
+        if (Log.HasLoggedErrors)
+            return false;
+        Log.LogMessage(MessageImportance.Normal, "R8 obfuscation: R8 gets all {0} required keep rule files and {1} AAR consumer rule files ({2} config files in all).",
+            (Required ?? new ITaskItem[0]).Length, aarRulesPassed.Count, passed.Count);
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <!-- Checks R8's output against every name the app looks up at runtime, whether or not the targets
+       that produce the keep rules ran, and whether or not R8 ran in this build: a dex reused from an
+       earlier build must still have what today's code needs. -->
+  <UsingTask TaskName="SdVerifyMapping" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <MappingFile ParameterType="System.String" Required="true" />
+      <ReferencesConfigs ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <AcwMapFile ParameterType="System.String" />
+      <AaptRulesFile ParameterType="System.String" />
+      <ManifestFile ParameterType="System.String" />
+      <JavaLibraries ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <MinimumRenamedPercent ParameterType="System.String" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.Globalization" />
+      <Using Namespace="System.IO.Compression" />
+      <Using Namespace="System.Text.RegularExpressions" />
+      <Using Namespace="System.Xml.Linq" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        Action<string> cannotVerify = what => Log.LogError(null, "SD0005", null, null, 0, 0, 0, 0,
+            "R8 obfuscation: cannot check R8's output: {0}. Rebuild with -t:Rebuild; if this persists, the .NET Android SDK has changed: update the checks in Platforms\\Android\\R8\\R8Obfuscation.targets, then build again.", what);
+
+        // mapping.txt: "original -> obfuscated:" for each class, then indented member lines
+        // "[start:end:]type name[(args)][:line[:line]] -> obfuscated". Members are kept as
+        // { name, obfuscated name, "(" for a method, type, argument types }. R8 inlines even with
+        // -dontoptimize, and lists an inlined call as extra lines with the same minified range and
+        // obfuscated name right above the method it was inlined into ("3:4:boolean isEnabled():50:50
+        // -> <init>" above "3:4:void <init>(boolean):50 -> <init>"); only the last line of such a
+        // group is a member of the class.
+        var classMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        var memberMap = new Dictionary<string, List<string[]>>(StringComparer.Ordinal);
+        var memberLine = new Regex(@"^(?<range>\d+:\d+:)?(?<type>[^\s(]+) (?<name>[^\s(]+)(?:\((?<args>[^)]*)\))?(?::\d+(?::\d+)?)? -> (?<new>\S+)$");
+        List<string[]> current = null;
+        string[] pending = null;
+        string pendingGroup = null;
+        foreach (var line in File.ReadLines(MappingFile))
+        {
+            if (line.Length == 0 || line[0] == '#')
+                continue;
+            if (line[0] != ' ' && line[0] != '\t')
+            {
+                if (pending != null)
+                    current.Add(pending);
+                pending = null;
+                current = null;
+                var arrow = line.IndexOf(" -> ", StringComparison.Ordinal);
+                if (arrow > 0 && line.EndsWith(":"))
+                {
+                    var original = line.Substring(0, arrow);
+                    classMap[original] = line.Substring(arrow + 4, line.Length - arrow - 5);
+                    current = new List<string[]>();
+                    memberMap[original] = current;
+                }
+                continue;
+            }
+            var match = current == null ? null : memberLine.Match(line.Trim());
+            if (match == null || !match.Success)
+                continue;
+            var member = new[] { match.Groups["name"].Value, match.Groups["new"].Value, match.Groups["args"].Success ? "(" : "", match.Groups["type"].Value, match.Groups["args"].Value };
+            var group = match.Groups["range"].Success ? match.Groups["range"].Value + member[1] : null;
+            if (pending != null && group != pendingGroup)
+                current.Add(pending);
+            pending = null;
+            if (group == null)
+                current.Add(member);
+            else
+            {
+                pending = member;
+                pendingGroup = group;
+            }
+        }
+        if (pending != null)
+            current.Add(pending);
+        if (classMap.Count == 0)
+        {
+            cannotVerify("no classes found in " + MappingFile);
+            return false;
+        }
+
+        // The names looked up at runtime, with why.
+        var needed = new Dictionary<string, string>(StringComparer.Ordinal);
+        Action<string, string> need = (name, why) => { if (name.Length > 0 && !needed.ContainsKey(name)) needed[name] = why; };
+        var javaName = new Regex(@"^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$");
+
+        // Bound Java types and the methods managed code calls on them ("-keep class X", then
+        // "-keepclassmembers class X {", one "*** name(...);" or "<init>(...);" per line, "}"),
+        // from every RID's file: the dex is shared, so it must suit all of them.
+        var boundMembers = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var referencesRead = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in ReferencesConfigs ?? new ITaskItem[0])
+        {
+            var path = item.GetMetadata("FullPath");
+            if (!File.Exists(path) || !referencesRead.Add(path))
+                continue;
+            string block = null;
+            foreach (var raw in File.ReadLines(path))
+            {
+                var line = raw.Trim();
+                if (block == null && line.StartsWith("-keep class ", StringComparison.Ordinal) && line.IndexOf('{') < 0)
+                    need(line.Substring("-keep class ".Length).Trim(), "bound Java type");
+                else if (block == null && line.StartsWith("-keepclassmembers class ", StringComparison.Ordinal) && line.EndsWith("{"))
+                {
+                    block = line.Substring("-keepclassmembers class ".Length).TrimEnd('{').Trim();
+                    if (!boundMembers.ContainsKey(block))
+                        boundMembers[block] = new HashSet<string>(StringComparer.Ordinal);
+                }
+                else if (block != null && line == "}")
+                    block = null;
+                else if (block != null && line.IndexOf('(') > 0)
+                {
+                    var head = line.Substring(0, line.IndexOf('(')).Trim();
+                    boundMembers[block].Add(head.Substring(head.LastIndexOf(' ') + 1));
+                }
+            }
+        }
+        if (referencesRead.Count == 0)
+            cannotVerify("no proguard_project_references.cfg was found");
+
+        // Java callable wrappers: acw-map.txt lines "managed name;java name".
+        var wrappers = new HashSet<string>(StringComparer.Ordinal);
+        if (string.IsNullOrEmpty(AcwMapFile) || !File.Exists(AcwMapFile))
+            cannotVerify("acw-map.txt was not found ('" + AcwMapFile + "')");
+        else
+            foreach (var raw in File.ReadLines(AcwMapFile))
+            {
+                var i = raw.LastIndexOf(';');
+                if (i > 0 && i < raw.Length - 1 && wrappers.Add(raw.Substring(i + 1).Trim()))
+                    need(raw.Substring(i + 1).Trim(), "callable wrapper");
+            }
+
+        // Classes the manifest and resources name: aapt2's "-keep class X { <init>(...); }" rules,
+        // and every class-like attribute value in the merged manifest (components, androidx.startup
+        // initializers in meta-data, ...).
+        if (string.IsNullOrEmpty(AaptRulesFile) || !File.Exists(AaptRulesFile))
+            cannotVerify("aapt2's keep rules were not found ('" + AaptRulesFile + "')");
+        else
+            foreach (var raw in File.ReadLines(AaptRulesFile))
+            {
+                var line = raw.Trim();
+                if (!line.StartsWith("-keep class ", StringComparison.Ordinal))
+                    continue;
+                var name = line.Substring("-keep class ".Length).Split(' ', '{')[0];
+                if (javaName.IsMatch(name))
+                    need(name, "class referenced from resources or the manifest");
+            }
+        if (string.IsNullOrEmpty(ManifestFile) || !File.Exists(ManifestFile))
+            cannotVerify("the merged AndroidManifest.xml was not found ('" + ManifestFile + "')");
+        else
+        {
+            var manifest = XDocument.Load(ManifestFile);
+            var package = (string)manifest.Root.Attribute("package") ?? "";
+            foreach (var attribute in manifest.Descendants().Attributes())
+            {
+                var value = attribute.Value.Trim();
+                if (value.StartsWith(".", StringComparison.Ordinal) && package.Length > 0)
+                    value = package + value;
+                if (javaName.IsMatch(value))
+                    need(value, "class named in AndroidManifest.xml");
+            }
+        }
+
+        // ServiceLoader interfaces and providers: META-INF/services/<interface> in the jars, one
+        // provider per line ('#' starts a comment).
+        var jars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in JavaLibraries ?? new ITaskItem[0])
+        {
+            var jar = item.GetMetadata("FullPath");
+            if (!jar.EndsWith(".jar", StringComparison.OrdinalIgnoreCase) || !jars.Add(jar))
+                continue;
+            if (!File.Exists(jar))
+            {
+                Log.LogError(null, "SD0004", null, jar, 0, 0, 0, 0,
+                    "R8 obfuscation: this jar is listed for the app but does not exist, so its ServiceLoader providers cannot be checked. Rebuild with -t:Rebuild, or remove the reference to the jar, then build again.");
+                continue;
+            }
+            try
+            {
+                using (var zip = new ZipArchive(File.OpenRead(jar), ZipArchiveMode.Read))
+                    foreach (var entry in zip.Entries)
+                    {
+                        if (!entry.FullName.StartsWith("META-INF/services/", StringComparison.Ordinal) || entry.Name.Length == 0)
+                            continue;
+                        need(entry.Name, "ServiceLoader interface");
+                        using (var reader = new StreamReader(entry.Open()))
+                        {
+                            string raw;
+                            while ((raw = reader.ReadLine()) != null)
+                            {
+                                var hash = raw.IndexOf('#');
+                                need((hash >= 0 ? raw.Substring(0, hash) : raw).Trim(), "ServiceLoader provider");
+                            }
+                        }
+                    }
+            }
+            catch (Exception e) when (e is InvalidDataException || e is IOException || e is UnauthorizedAccessException || e is NotSupportedException)
+            {
+                Log.LogError(null, "SD0004", null, jar, 0, 0, 0, 0,
+                    "R8 obfuscation: could not read this jar to check its ServiceLoader providers ({0}). Restore or replace the jar, then build again.", e.Message);
+            }
+        }
+        if (jars.Count == 0)
+            cannotVerify("no jars are listed for the app");
+
+        // Renamed names, and renamed members the app calls through JNI: the methods managed code
+        // calls on bound types, every member of a callable wrapper, and the types in their
+        // signatures (JNI matches name and signature).
+        var renamed = new List<string>();
+        foreach (var pair in needed)
+        {
+            string to;
+            if (classMap.TryGetValue(pair.Key, out to) && to != pair.Key)
+                renamed.Add(pair.Value + " " + pair.Key + " -> " + to);
+        }
+        var membersChecked = 0;
+        Action<string, string[], string> checkMember = (owner, member, why) =>
+        {
+            membersChecked++;
+            if (member[0] != member[1])
+                renamed.Add(why + " " + owner + "." + member[0] + " -> " + member[1]);
+            var types = new List<string> { member[3] };
+            if (member[2] == "(" && member[4].Length > 0)
+                types.AddRange(member[4].Split(','));
+            foreach (var type in types)
+            {
+                var element = type.Trim();
+                while (element.EndsWith("[]", StringComparison.Ordinal))
+                    element = element.Substring(0, element.Length - 2);
+                string to;
+                if (classMap.TryGetValue(element, out to) && to != element)
+                    renamed.Add("type in the signature of " + owner + "." + member[0] + ": " + element + " -> " + to);
+            }
+        };
+        foreach (var pair in boundMembers)
+        {
+            List<string[]> list;
+            if (pair.Value.Count == 0 || !memberMap.TryGetValue(pair.Key, out list))
+                continue;
+            foreach (var member in list)
+                if (member[2] == "(" && member[0].IndexOf('.') < 0 && pair.Value.Contains(member[0]))
+                    checkMember(pair.Key, member, "method managed code calls on");
+        }
+        // Synthetic members (javac's lambda$ bodies and access$ methods, R8's own) have a '$' in their
+        // names, are never reached through JNI, and R8 renames lambda bodies even under -keep.
+        foreach (var wrapper in wrappers)
+        {
+            List<string[]> list;
+            if (!memberMap.TryGetValue(wrapper, out list))
+                continue;
+            foreach (var member in list)
+                if (member[0].IndexOf('.') < 0 && member[0].IndexOf('$') < 0 && member[0] != "<clinit>")
+                    checkMember(wrapper, member, "member of callable wrapper");
+        }
+        // A method R8 maps over several line ranges is listed once per range; report it once.
+        renamed = renamed.Distinct().ToList();
+        if (renamed.Count > 0)
+            Log.LogError(null, "SD0005", null, MappingFile, 0, 0, 0, 0,
+                "R8 obfuscation: R8's output renames {0} name(s) the app looks up by name at runtime, so the obfuscated app would crash: {1}. If R8 was skipped as up to date, its output is stale: rebuild with -t:Rebuild. Otherwise a keep rule is missing: add one to Platforms\\Android\\R8\\obfuscation.cfg, then build again.",
+                renamed.Count, string.Join("; ", renamed.Take(12)) + (renamed.Count > 12 ? "; ..." : ""));
+
+        // Obfuscation must have happened: with -dontobfuscate from any source, R8 renames nothing.
+        double floor;
+        if (!double.TryParse(MinimumRenamedPercent, NumberStyles.Float, CultureInfo.InvariantCulture, out floor))
+            floor = 25;
+        var renamedClasses = classMap.Count(p => p.Key != p.Value);
+        var percent = 100.0 * renamedClasses / classMap.Count;
+        if (percent < floor)
+            Log.LogError(null, "SD0006", null, MappingFile, 0, 0, 0, 0,
+                "R8 obfuscation is OFF: R8 renamed only {0} of {1} classes ({2}%), below the {3}% floor (SdMinimumRenamedClassPercent). Some config file R8 gets says -dontobfuscate or keeps everything: check R8's --pg-conf files (NuGet and AAR consumer rules, the SDK's proguard_xamarin.cfg) and AndroidR8ExtraArguments, remove it, then build again. Google Play requires the bundle to be obfuscated.",
+                renamedClasses, classMap.Count, percent.ToString("F1", CultureInfo.InvariantCulture), floor.ToString(CultureInfo.InvariantCulture));
+
+        Log.LogMessage(MessageImportance.Normal, "R8 obfuscation: checked {0} names and {1} members against {2}; {3} of {4} classes renamed ({5}%).",
+            needed.Count, membersChecked, MappingFile, renamedClasses, classMap.Count, percent.ToString("F1", CultureInfo.InvariantCulture));
+        if (Log.HasLoggedErrors)
+            return false;
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <!-- Checks that a signed package has every META-INF/services file the app's jars provide (the
+       jars and the AndroidPackagingOptions patterns the SDK packages them with). -->
+  <UsingTask TaskName="SdVerifyPackagedServices" TaskFactory="RoslynCodeTaskFactory"
+             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+    <ParameterGroup>
+      <Packages ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <JavaLibraries ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <ExcludePatterns ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <IncludePatterns ParameterType="Microsoft.Build.Framework.ITaskItem[]" />
+      <AndroidPackageFormat ParameterType="System.String" />
+    </ParameterGroup>
+    <Task>
+      <Using Namespace="System.IO.Compression" />
+      <Using Namespace="System.Text.RegularExpressions" />
+      <Code Type="Fragment" Language="cs"><![CDATA[
+        // The same glob-to-regex conversion and matching as the SDK's CollectJarContentFilesForArchive:
+        // patterns are matched against the archive path ("root/..." in an app bundle), and an
+        // include pattern wins over an exclude pattern.
+        Func<string, Regex> glob = pattern =>
+        {
+            var regex = new StringBuilder();
+            foreach (var c in pattern)
+                regex.Append(c == '*' ? ".*" : c == '?' ? "." : c == '.' ? "\\." : c.ToString());
+            return new Regex(regex.ToString(), RegexOptions.IgnoreCase);
+        };
+        var excludes = (ExcludePatterns ?? new ITaskItem[0]).Select(i => glob(i.ItemSpec)).ToList();
+        var includes = (IncludePatterns ?? new ITaskItem[0]).Select(i => glob(i.ItemSpec)).ToList();
+        var prefix = string.Equals(AndroidPackageFormat, "aab", StringComparison.OrdinalIgnoreCase) ? "root/" : "";
+
+        var expected = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        var jars = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in JavaLibraries ?? new ITaskItem[0])
+        {
+            var jar = item.GetMetadata("FullPath");
+            if (!jar.EndsWith(".jar", StringComparison.OrdinalIgnoreCase) || !jars.Add(jar))
+                continue;
+            if (!File.Exists(jar))
+            {
+                Log.LogError(null, "SD0004", null, jar, 0, 0, 0, 0,
+                    "R8 obfuscation: this jar is listed for packaging but does not exist, so its META-INF/services files cannot be checked. Rebuild with -t:Rebuild, or remove the reference to the jar, then build again.");
+                continue;
+            }
+            try
+            {
+                using (var zip = new ZipArchive(File.OpenRead(jar), ZipArchiveMode.Read))
+                    foreach (var entry in zip.Entries)
+                    {
+                        if (!entry.FullName.StartsWith("META-INF/services/", StringComparison.Ordinal) || entry.Name.Length == 0)
+                            continue;
+                        var archivePath = prefix + entry.FullName;
+                        if (!includes.Any(r => r.IsMatch(archivePath)) && excludes.Any(r => r.IsMatch(archivePath)))
+                            continue;
+                        if (!expected.ContainsKey(entry.FullName))
+                            expected[entry.FullName] = jar;
+                    }
+            }
+            catch (Exception e) when (e is InvalidDataException || e is IOException || e is UnauthorizedAccessException || e is NotSupportedException)
+            {
+                Log.LogError(null, "SD0004", null, jar, 0, 0, 0, 0,
+                    "R8 obfuscation: could not read this jar to check that its META-INF/services files are packaged ({0}). Restore or replace the jar, then build again.", e.Message);
+            }
+        }
+        if (jars.Count == 0)
+            Log.LogError(null, "SD0007", null, null, 0, 0, 0, 0,
+                "R8 obfuscation: no jars are listed for packaging, so the package's META-INF/services files cannot be checked. The .NET Android SDK may have changed; update the checks in Platforms\\Android\\R8\\R8Obfuscation.targets, then build again.");
+
+        foreach (var package in Packages ?? new ITaskItem[0])
+        {
+            var path = package.GetMetadata("FullPath");
+            if (!File.Exists(path))
+            {
+                Log.LogError(null, "SD0007", null, path, 0, 0, 0, 0,
+                    "R8 obfuscation: the signed package does not exist, so its META-INF/services files cannot be checked. Rebuild with -t:Rebuild.");
+                continue;
+            }
+            // An app bundle keeps jar resources under base/root/, an APK at its root.
+            var root = path.EndsWith(".aab", StringComparison.OrdinalIgnoreCase) ? "base/root/" : "";
+            var entries = new HashSet<string>(StringComparer.Ordinal);
+            try
+            {
+                using (var zip = new ZipArchive(File.OpenRead(path), ZipArchiveMode.Read))
+                    foreach (var entry in zip.Entries)
+                        entries.Add(entry.FullName);
+            }
+            catch (Exception e) when (e is InvalidDataException || e is IOException || e is UnauthorizedAccessException || e is NotSupportedException)
+            {
+                Log.LogError(null, "SD0007", null, path, 0, 0, 0, 0,
+                    "R8 obfuscation: could not read the signed package to check its META-INF/services files ({0}). Rebuild with -t:Rebuild.", e.Message);
+                continue;
+            }
+            var missing = expected.Where(p => !entries.Contains(root + p.Key)).Select(p => p.Key + " (from " + Path.GetFileName(p.Value) + ")").ToList();
+            if (missing.Count > 0)
+                Log.LogError(null, "SD0007", null, path, 0, 0, 0, 0,
+                    "R8 obfuscation: the signed package lacks {0} META-INF/services file(s) the app's jars provide: {1}. ServiceLoader then finds no provider at runtime (kotlinx.coroutines has no Dispatchers.Main) and the app crashes. The SDK's packaging bug that _SdFreshPackageArchive in Platforms\\Android\\R8\\R8Obfuscation.targets works around is back: rebuild with -t:Rebuild, and if this persists, check that the SDK still runs _BuildApkEmbed and update the workaround.",
+                    missing.Count, string.Join("; ", missing));
+            else
+                Log.LogMessage(MessageImportance.Normal, "R8 obfuscation: {0} has all {1} META-INF/services files from the app's jars.", path, expected.Count);
+        }
+        if (Log.HasLoggedErrors)
+            return false;
+      ]]></Code>
+    </Task>
+  </UsingTask>
+
+  <!-- Paths the targets below share. Set in a target, not at evaluation, because this file is
+       imported before the SDK sets IntermediateOutputPath. -->
+  <Target Name="_SdDefineProperties">
     <PropertyGroup>
       <_SdSdkXamarinRules>$(IntermediateOutputPath)proguard\proguard_xamarin.cfg</_SdSdkXamarinRules>
       <_SdSdkXamarinRulesFullPath>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(_SdSdkXamarinRules)'))</_SdSdkXamarinRulesFullPath>
       <_SdProjectXamarinRules>$(MSBuildThisFileDirectory)proguard_xamarin.cfg</_SdProjectXamarinRules>
       <_SdAppRules>$(MSBuildThisFileDirectory)obfuscation.cfg</_SdAppRules>
       <_SdGeneratedRules>$(IntermediateOutputPath)proguard\proguard_obfuscation.cfg</_SdGeneratedRules>
+      <!-- Where _CreateBaseApkWithAapt2 (Xamarin.Android.Aapt2.targets) has aapt2 write its keep rules. -->
+      <_SdAaptRules>$(IntermediateOutputPath)aapt_rules.txt</_SdAaptRules>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="_SdUseObfuscatingXamarinRules"
+          AfterTargets="_CalculateProguardConfigurationFiles"
+          DependsOnTargets="_SdDefineProperties"
+          Condition=" '$(AndroidLinkTool)' == 'r8' ">
+    <PropertyGroup>
       <_SdMappingFile Condition=" '$(AndroidProguardMappingFile)' != '' ">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(AndroidProguardMappingFile)'))</_SdMappingFile>
-      <!-- R8 reruns only when its inputs change; make edits to these files count. -->
-      <_CompileToDalvikInputs>$(_CompileToDalvikInputs);$(_SdProjectXamarinRules);$(_SdAppRules);$(MSBuildThisFileFullPath)</_CompileToDalvikInputs>
+      <!-- R8 reruns only when its inputs change. Count edits to the project's rule files and this
+           file, and every change to the keep rules: the SDK leaves its own
+           proguard_project_references.cfg and acw-map.txt out of R8's inputs, so a C#-only change
+           that starts using a Java type or method would otherwise ship a dex built without its
+           keep rule, which obfuscation makes a crash. -->
+      <_CompileToDalvikInputs>$(_CompileToDalvikInputs);$(_SdProjectXamarinRules);$(_SdAppRules);$(MSBuildThisFileFullPath);$(_SdGeneratedRules);$(_ProguardProjectConfiguration);$(_AcwMapFile)</_CompileToDalvikInputs>
     </PropertyGroup>
 
     <!-- The R8 task only warns about a missing config file and carries on, which here would
@@ -219,13 +707,25 @@
     <MakeDir Directories="$(IntermediateOutputPath)proguard" />
     <SdWriteObfuscationRules ReferencesConfig="$(_ProguardProjectConfiguration)"
                              AcwMapFile="$(_AcwMapFile)"
-                             JavaLibraries="@(_JavaLibrariesToCompileForApp);@(AndroidJavaLibrary);@(ExtractedJarImports)"
+                             JavaLibraries="@(_JavaLibrariesToCompileForApp);@(AndroidJavaLibrary);@(ExtractedJarImports);@(AndroidJavaSource)"
                              MappingFile="$(_SdMappingFile)"
                              IgnoreWarnings="$(AndroidR8IgnoreWarnings)"
                              OutputFile="$(_SdGeneratedRules)" />
 
     <ItemGroup>
       <_ProguardConfiguration Remove="$(_SdSdkXamarinRules)" />
+
+      <!-- aapt2's keep rules for the classes the manifest and layouts name reach R8 only from builds
+           that relink resources: _CreateBaseApkWithAapt2 adds aapt_rules.txt to
+           @(ProguardConfiguration) only when it runs, and IncrementalClean then deletes the file in
+           the next build that doesn't. An R8 run in any other build (a C#-only change reruns R8)
+           removes or renames CoreComponentFactory, AppCompat's decor views and others, and the app
+           crashes at startup. Keep the file, and pass it where a clean build does. -->
+      <FileWrites Include="$(_SdAaptRules)" Condition=" Exists('$(_SdAaptRules)') " />
+      <_SdAaptRulesItem Include="$(_SdAaptRules)" Condition=" Exists('$(_SdAaptRules)') " />
+      <_SdAaptRulesItem Remove="@(_ProguardConfiguration)" />
+      <_ProguardConfiguration Include="@(_SdAaptRulesItem)" />
+
       <_ProguardConfiguration Include="$(_SdProjectXamarinRules);$(_SdAppRules);$(_SdGeneratedRules)" />
       <FileWrites Include="$(_SdGeneratedRules)" />
 
@@ -248,17 +748,71 @@
            Text="R8 obfuscation is OFF: the SDK's proguard_xamarin.cfg (with -dontobfuscate) is still passed to R8, as '@(_SdStillDontObfuscate)'. The SDK now lists it differently from '$(_SdSdkXamarinRules)'; update the Remove in Platforms\Android\R8\R8Obfuscation.targets to match, then build again." />
   </Target>
 
+  <!-- Just before R8 (whether it then runs or is up to date), and whether or not the target above
+       ran: check what R8 gets. -->
+  <Target Name="_SdVerifyR8Configuration"
+          BeforeTargets="_CompileToDalvik"
+          DependsOnTargets="_SdDefineProperties"
+          Condition=" '$(AndroidLinkTool)' == 'r8' ">
+    <Error Condition=" '$(AndroidProguardMappingFile)' == '' " Code="SD0010"
+           Text="R8 obfuscation: R8 will not write a mapping file (AndroidProguardMappingFile is empty), so Google Play could not deobfuscate crash reports and this build could not check R8's output. Set AndroidCreateProguardMappingFile to true (the default with R8), then build again." />
+    <Error Condition=" '$(_ProguardProjectConfiguration)' == '' " Code="SD0011"
+           Text="R8 obfuscation: the SDK no longer sets _ProguardProjectConfiguration, so R8 would not get the keep rules for the Java types managed code uses, and the obfuscated app would crash at runtime. Update Platforms\Android\R8\R8Obfuscation.targets for this SDK, then build again." />
+    <ItemGroup>
+      <_SdRequiredR8Configuration Include="$(_ProguardProjectConfiguration);$(IntermediateOutputPath)proguard\proguard_project_primary.cfg;$(_SdAaptRules);$(_SdProjectXamarinRules);$(_SdAppRules);$(_SdGeneratedRules)" />
+      <_SdForbiddenR8Configuration Include="$(_SdSdkXamarinRules)" />
+    </ItemGroup>
+    <SdCheckR8Configuration Configuration="@(_ProguardConfiguration)"
+                            Required="@(_SdRequiredR8Configuration)"
+                            Forbidden="@(_SdForbiddenR8Configuration)"
+                            ExtractedDirectories="@(_ExtractedDirectories)"
+                            ImportsDirectoryName="$(_LibraryProjectImportsDirectoryName)"
+                            AarLibraries="@(AndroidAarLibrary)"
+                            AllowNoAarConsumerRules="$(SdAllowNoAarConsumerRules)" />
+  </Target>
+
   <!-- After R8 runs, the obj copy holds the SDK's current rules: fail if they no longer match ours,
        so an SDK update can't silently add or drop keep rules. -->
   <Target Name="_SdCheckSdkXamarinRules"
           AfterTargets="_CompileToDalvik"
-          Condition=" '$(AndroidLinkTool)' == 'r8' And Exists('$(IntermediateOutputPath)proguard\proguard_xamarin.cfg') ">
-    <SdCompareXamarinRules SdkRules="$(IntermediateOutputPath)proguard\proguard_xamarin.cfg"
-                           ProjectRules="$(MSBuildThisFileDirectory)proguard_xamarin.cfg">
+          DependsOnTargets="_SdDefineProperties"
+          Condition=" '$(AndroidLinkTool)' == 'r8' ">
+    <Error Condition=" !Exists('$(_SdSdkXamarinRules)') " Code="SD0009"
+           Text="R8 obfuscation: the SDK's R8 rules ('$(_SdSdkXamarinRules)') do not exist after R8, so this build cannot check that Platforms\Android\R8\proguard_xamarin.cfg still matches them (SD0001). Rebuild with -t:Rebuild; if this persists, the SDK's R8 task now writes its rules elsewhere: update _SdSdkXamarinRules in Platforms\Android\R8\R8Obfuscation.targets." />
+    <SdCompareXamarinRules SdkRules="$(_SdSdkXamarinRules)"
+                           ProjectRules="$(_SdProjectXamarinRules)">
       <Output TaskParameter="Differences" PropertyName="_SdXamarinRulesDiff" />
     </SdCompareXamarinRules>
     <Error Condition=" '$(_SdXamarinRulesDiff)' != '' " Code="SD0001"
            Text="The .NET Android SDK's R8 rules (obj\...\proguard\proguard_xamarin.cfg) differ from Platforms\Android\R8\proguard_xamarin.cfg, so keep rules the SDK now relies on may be missing from the obfuscated build. Copy the new rules over, minus -dontobfuscate, re-test the Release build, then build again. Changes: $(_SdXamarinRulesDiff)" />
+  </Target>
+
+  <!-- After R8 (it runs even when R8 is skipped as up to date), check R8's output itself: every name
+       the app looks up at runtime kept (SD0005), and obfuscation really on (SD0006). -->
+  <Target Name="_SdVerifyMapping"
+          AfterTargets="_CompileToDalvik"
+          DependsOnTargets="_SdDefineProperties"
+          Condition=" '$(AndroidLinkTool)' == 'r8' ">
+    <PropertyGroup>
+      <_SdVerifyMappingFile Condition=" '$(AndroidProguardMappingFile)' != '' ">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(AndroidProguardMappingFile)'))</_SdVerifyMappingFile>
+      <!-- The SDK sets _Aapt2ProguardRules only in builds that relink resources. -->
+      <_SdVerifyAaptRules>$(_Aapt2ProguardRules)</_SdVerifyAaptRules>
+      <_SdVerifyAaptRules Condition=" '$(_SdVerifyAaptRules)' == '' ">$(_SdAaptRules)</_SdVerifyAaptRules>
+    </PropertyGroup>
+    <Error Condition=" '$(_SdVerifyMappingFile)' == '' Or !Exists('$(_SdVerifyMappingFile)') " Code="SD0010"
+           Text="R8 obfuscation: R8's mapping file ('$(_SdVerifyMappingFile)') does not exist, so this build cannot check that R8 kept the names the app looks up at runtime, and Google Play could not deobfuscate crash reports. Rebuild with -t:Rebuild." />
+    <ItemGroup>
+      <_SdReferencesConfig Include="$(_ProguardProjectConfiguration)" />
+      <_SdRuntimeIdentifier Include="$(RuntimeIdentifiers)" />
+      <_SdReferencesConfig Include="@(_SdRuntimeIdentifier->'$(IntermediateOutputPath)%(Identity)\proguard\proguard_project_references.cfg')" />
+    </ItemGroup>
+    <SdVerifyMapping MappingFile="$(_SdVerifyMappingFile)"
+                     ReferencesConfigs="@(_SdReferencesConfig)"
+                     AcwMapFile="$(_AcwMapFile)"
+                     AaptRulesFile="$(_SdVerifyAaptRules)"
+                     ManifestFile="$(IntermediateOutputPath)android\AndroidManifest.xml"
+                     JavaLibraries="@(_JavaLibrariesToCompileForApp);@(AndroidJavaLibrary);@(ExtractedJarImports);@(AndroidJavaSource)"
+                     MinimumRenamedPercent="$(SdMinimumRenamedClassPercent)" />
   </Target>
 
   <!-- Workaround for an SDK packaging bug that hits Release builds with or without R8: when
@@ -274,5 +828,31 @@
           Condition=" '$(EmbedAssembliesIntoApk)' == 'True' ">
     <Delete Condition=" '$(AndroidPackageFormat)' == 'aab' " Files="$(_BaseZipIntermediate)" />
     <Delete Condition=" '$(AndroidPackageFormat)' != 'aab' " Files="$(ApkFileIntermediate)" />
+  </Target>
+
+  <!-- After signing (it runs even when signing is skipped as up to date), check the package itself
+       for the workaround above: every META-INF/services file from the app's jars (SD0007). -->
+  <Target Name="_SdVerifySignedPackage"
+          AfterTargets="_Sign">
+    <ItemGroup>
+      <_SdSignedPackage Condition=" '$(AndroidPackageFormat)' == 'aab' " Include="$(_AabFileSigned)" />
+      <_SdSignedPackage Condition=" '$(AndroidPackageFormat)' != 'aab' " Include="$(ApkFileSigned)" />
+    </ItemGroup>
+    <SdVerifyPackagedServices Packages="@(_SdSignedPackage)"
+                              JavaLibraries="@(AndroidJavaLibrary);@(ExtractedJarImports);@(AndroidJavaSource)"
+                              ExcludePatterns="@(AndroidPackagingOptionsExclude)"
+                              IncludePatterns="@(AndroidPackagingOptionsInclude)"
+                              AndroidPackageFormat="$(AndroidPackageFormat)" />
+  </Target>
+
+  <!-- The universal APK that bundletool makes from the app bundle (AndroidPackageFormats aab;apk). -->
+  <Target Name="_SdVerifyUniversalApk"
+          AfterTargets="_CreateUniversalApkFromBundle"
+          Condition=" '$(AndroidPackageFormat)' == 'aab' And $(_AndroidAdditionalPackageFormats.Contains('apk')) ">
+    <SdVerifyPackagedServices Packages="$(ApkFileSigned)"
+                              JavaLibraries="@(AndroidJavaLibrary);@(ExtractedJarImports);@(AndroidJavaSource)"
+                              ExcludePatterns="@(AndroidPackagingOptionsExclude)"
+                              IncludePatterns="@(AndroidPackagingOptionsInclude)"
+                              AndroidPackageFormat="$(AndroidPackageFormat)" />
   </Target>
 </Project>
