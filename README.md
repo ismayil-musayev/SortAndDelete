@@ -158,7 +158,10 @@ workload). Android 10 (API 29)+ / iOS 15+.
 Gotcha worth knowing: `createTrashRequest`/`createWriteRequest` require **typed** media URIs
 (`images/media`, `video/media`) — files-table URIs are rejected. The Android service resolves
 each id's media kind (including trashed rows via `QUERY_ARG_MATCH_TRASHED`) before building
-consent requests. And a query on an item's own uri finds it even in the system trash
+consent requests. Android 10's `loadThumbnail` needs typed uris too: its MediaProvider makes
+thumbnails only for those and fails a files-table uri with `FileNotFoundException` (Android 11
+resolves one to its type), so thumbnails and duplicate fingerprints go through typed uris on every
+version. And a query on an item's own uri finds it even in the system trash
 (`is_trashed=1`); whether the gallery still has it is a question for the collection. The uri
 also names the volume: MediaStore puts a moved item on the volume its uri names, and `external`
 means internal storage, so an item on an SD card is moved (and its write consent asked for)

@@ -32,8 +32,9 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
 
     /// <summary>
     /// createTrashRequest/createWriteRequest reject files-table URIs ("All requested items
-    /// must be Media items") — they need typed images/video URIs. We remember each id's
-    /// kind from queries and fall back to a trashed-inclusive lookup for unknown ids.
+    /// must be Media items"), and Android 10 makes no thumbnails for them — both need typed
+    /// images/video URIs. We remember each id's kind from queries and fall back to a
+    /// trashed-inclusive lookup for unknown ids.
     /// </summary>
     private readonly Dictionary<string, MediaKind> _kindCache = [];
 
@@ -163,7 +164,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         {
             try
             {
-                var uri = UriFor(photoId);
+                var uri = ResolveTypedUris([photoId])[0];
 
                 bool isVideo;
                 lock (_kindCache)
@@ -213,7 +214,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             {
                 // The MediaStore thumbnail on purpose: it is cached and fast, and across a
                 // whole library that matters far more than fidelity does at 32 pixels square.
-                using var thumbnail = Resolver.LoadThumbnail(UriFor(photoId),
+                using var thumbnail = Resolver.LoadThumbnail(ResolveTypedUris([photoId])[0],
                     new Android.Util.Size(ThumbnailSourceSize, ThumbnailSourceSize), null);
                 return thumbnail is null ? null : ToPackedRgb(thumbnail, size);
             }
@@ -2135,7 +2136,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         public void OnScanCompleted(string? path, AndroidUri? uri) => tcs.TrySetResult(uri);
     }
 
-    /// <summary>Files-table item uri — fine for thumbnails and metadata, NOT for trash/write requests.</summary>
+    /// <summary>Files-table item uri — fine for metadata and reading the file, NOT for trash/write requests or (Android 10) thumbnails.</summary>
     private static AndroidUri UriFor(string photoId) =>
         ContentUris.WithAppendedId(FilesUri, long.Parse(photoId));
 
@@ -2146,14 +2147,25 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
                 : MediaStore.Images.Media.ExternalContentUri!,
             long.Parse(photoId));
 
-    private async Task<List<AndroidUri>> ResolveTypedUrisAsync(IReadOnlyList<string> photoIds)
+    /// <summary><see cref="ResolveTypedUris"/>, off the calling thread.</summary>
+    private Task<List<AndroidUri>> ResolveTypedUrisAsync(IReadOnlyList<string> photoIds) =>
+        Task.Run(() => ResolveTypedUris(photoIds));
+
+    /// <summary>
+    /// Each item's typed uri (images/media or video/media), for what takes no other: consent
+    /// requests, and thumbnails on Android 10, whose MediaProvider makes them only for typed
+    /// uris (a files-table one throws FileNotFoundException; Android 11 resolves it to its
+    /// type). Kinds come from the cache; ids it doesn't know yet are looked up first, in one
+    /// query that finds items in the system trash too (the gallery doesn't list those). Blocking.
+    /// </summary>
+    private List<AndroidUri> ResolveTypedUris(IReadOnlyList<string> photoIds)
     {
         List<string> missing;
         lock (_kindCache)
             missing = photoIds.Where(id => !_kindCache.ContainsKey(id)).ToList();
 
         if (missing.Count > 0)
-            await Task.Run(() => QueryKindsIntoCache(missing));
+            QueryKindsIntoCache(missing);
 
         lock (_kindCache)
             return photoIds
