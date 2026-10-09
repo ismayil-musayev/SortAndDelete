@@ -59,22 +59,26 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
                 stillsToRead.Add(photo);
         }
 
-        var videosToRead = new List<PhotoAsset>();
+        // A clip's frames are slots, one per sample position, null where nothing current is
+        // cached. A clip missing a frame reads only that one, not the whole clip over again.
+        var videosToRead = new List<(PhotoAsset Video, ImageSignature?[] Known)>();
+        int framesToRead = 0;
         foreach (var video in photos.Where(p => p.Kind == MediaKind.Video && samplable.Contains(p.Id)))
         {
-            var sampled = new List<ImageSignature>();
-            for (int frame = 0; frame < VideoFingerprint.SamplePositions.Length; frame++)
-            {
-                if (Cached(cached, video, frame) is { } signature)
-                    sampled.Add(signature);
-                else
-                    break;
-            }
+            var known = new ImageSignature?[VideoFingerprint.SamplePositions.Length];
+            for (int frame = 0; frame < known.Length; frame++)
+                known[frame] = Cached(cached, video, frame);
 
-            if (sampled.Count == VideoFingerprint.SamplePositions.Length)
-                frames[video.Id] = sampled;
+            int missing = known.Count(slot => slot is null);
+            if (missing == 0)
+            {
+                frames[video.Id] = known;
+            }
             else
-                videosToRead.Add(video);
+            {
+                videosToRead.Add((video, known));
+                framesToRead += missing;
+            }
         }
 
         // Hashes cached before files carried a stamp. One that could make an identical pair is
@@ -97,9 +101,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             .Where(p => !(contentHashes.TryGetValue(p.Id, out var row) && row.IsCurrentFor(p)))
             .ToList();
 
-        int total = stillsToRead.Count
-            + (videosToRead.Count * VideoFingerprint.SamplePositions.Length)
-            + toHash.Count;
+        int total = stillsToRead.Count + framesToRead + toHash.Count;
         int done = 0;
 
         if (total == 0)
@@ -125,9 +127,12 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             await AdvanceAsync("Fingerprinting photos");
         });
 
-        await RunAsync(videosToRead, Concurrency, ct, async video =>
+        await RunAsync(videosToRead, Concurrency, ct, async clip =>
         {
-            var sampled = await VideoFingerprint.SampleAsync(async frame =>
+            var (video, known) = clip;
+
+            // Only the empty slots are read, which is what framesToRead counted.
+            var sampled = await VideoFingerprint.SampleAsync(known, async frame =>
             {
                 var pixels = await library.GetVideoFramePixelsAsync(
                     video.Id, VideoFingerprint.SamplePositions[frame], SignatureBuilder.GridSize, ct);

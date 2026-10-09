@@ -44,11 +44,28 @@ public static class VideoFingerprint
     /// one that can't be read, and each result keeps its own slot: closing a gap up would pair
     /// every later frame with a different moment of the other clip. An exception ends the clip.
     /// </summary>
-    public static async Task<ImageSignature?[]> SampleAsync(Func<int, Task<ImageSignature?>> readFrame)
+    public static Task<ImageSignature?[]> SampleAsync(Func<int, Task<ImageSignature?>> readFrame) =>
+        SampleAsync(new ImageSignature?[SamplePositions.Length], readFrame);
+
+    /// <summary>
+    /// The same for a clip whose frames are partly known already: <paramref name="known"/> has a
+    /// slot per sample position, null where that frame is still to be read. Only those positions
+    /// are read, in order, and the known frames stay in their slots, so a clip missing one frame
+    /// costs one read instead of all of them. <paramref name="known"/> itself is left as it is.
+    /// </summary>
+    public static async Task<ImageSignature?[]> SampleAsync(
+        IReadOnlyList<ImageSignature?> known, Func<int, Task<ImageSignature?>> readFrame)
     {
+        if (known.Count != SamplePositions.Length)
+        {
+            throw new ArgumentException(
+                $"Expected a slot for each of the {SamplePositions.Length} sample positions, got {known.Count}.",
+                nameof(known));
+        }
+
         var frames = new ImageSignature?[SamplePositions.Length];
         for (int i = 0; i < frames.Length; i++)
-            frames[i] = await readFrame(i);
+            frames[i] = known[i] ?? await readFrame(i);
         return frames;
     }
 

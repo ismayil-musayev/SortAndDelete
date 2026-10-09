@@ -171,4 +171,81 @@ public class VideoFingerprintTests
         Assert.Equal(expected, frames);
         Assert.Equal([0, 1, 2, 3], asked);
     }
+
+    /// <summary>
+    /// A clip with frames cached from an earlier scan reads only the positions it is missing,
+    /// in order, instead of being sampled all over again, and the cached frames keep their slots.
+    /// </summary>
+    [Fact]
+    public async Task Only_the_missing_frames_are_read_and_the_known_ones_keep_their_slots()
+    {
+        ImageSignature?[] known = [Frame(hash: 1), null, Frame(hash: 3), null];
+        var read = new[] { Frame(hash: 21), Frame(hash: 22), Frame(hash: 23), Frame(hash: 24) };
+        var asked = new List<int>();
+
+        var frames = await VideoFingerprint.SampleAsync(known, index =>
+        {
+            asked.Add(index);
+            return Task.FromResult<ImageSignature?>(read[index]);
+        });
+
+        ImageSignature?[] expected = [known[0], read[1], known[2], read[3]];
+        Assert.Equal(expected, frames);
+        Assert.Equal([1, 3], asked);
+    }
+
+    [Fact]
+    public async Task A_clip_whose_frames_are_all_known_reads_nothing()
+    {
+        ImageSignature?[] known = [Frame(hash: 1), Frame(hash: 2), Frame(hash: 3), Frame(hash: 4)];
+
+        var frames = await VideoFingerprint.SampleAsync(known, index =>
+            throw new InvalidOperationException($"Frame {index} is known and should not be read."));
+
+        Assert.Equal(known, frames);
+    }
+
+    /// <summary>
+    /// A frame that still can't be read leaves its slot empty, and costs the clip neither the
+    /// frames it already had nor the ones after it.
+    /// </summary>
+    [Fact]
+    public async Task A_frame_still_unreadable_stays_empty_beside_the_known_ones()
+    {
+        ImageSignature?[] known = [Frame(hash: 1), null, null, Frame(hash: 4)];
+        var third = Frame(hash: 3);
+        var asked = new List<int>();
+
+        var frames = await VideoFingerprint.SampleAsync(known, index =>
+        {
+            asked.Add(index);
+            return Task.FromResult<ImageSignature?>(index == 2 ? third : null);
+        });
+
+        ImageSignature?[] expected = [known[0], null, third, known[3]];
+        Assert.Equal(expected, frames);
+        Assert.Equal([1, 2], asked);
+    }
+
+    [Fact]
+    public async Task The_known_frames_passed_in_are_left_as_they_were()
+    {
+        ImageSignature?[] known = [null, Frame(hash: 2), null, null];
+        ImageSignature?[] before = [.. known];
+
+        var frames = await VideoFingerprint.SampleAsync(known, index =>
+            Task.FromResult<ImageSignature?>(Frame(hash: 10 + (ulong)index)));
+
+        Assert.Equal(before, known);
+        Assert.NotSame(known, frames);
+    }
+
+    [Fact]
+    public async Task Known_frames_need_a_slot_for_every_position()
+    {
+        ImageSignature?[] tooFew = [Frame(hash: 1), Frame(hash: 2)];
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            VideoFingerprint.SampleAsync(tooFew, _ => Task.FromResult<ImageSignature?>(null)));
+    }
 }
