@@ -171,8 +171,11 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     }
 
     /// <summary>
-    /// Loads the page again after the library may have changed. A load in progress may have read
-    /// the library before the change, so this waits for it to end and then loads.
+    /// Loads the page again after something it shows has changed: the library, the folder
+    /// selection, the review decisions. A load in progress may have read them before the change,
+    /// so this waits for it to end and then loads. Requests that waited for the same load end in
+    /// one load: the first to resume starts it, after all of their changes, and the others find
+    /// it running.
     /// </summary>
     public async Task ReloadAsync()
     {
@@ -206,7 +209,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         foreach (var folder in Folders)
             folder.IsSelected = ReferenceEquals(folder, chip);
 
-        await LoadAsync();
+        await ReloadAsync();
     }
 
     [RelayCommand]
@@ -302,7 +305,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
             await gallery.Store.ClearKeepDecisionsForMonthAsync(month.MonthKey);
 
         CancelSelection();
-        await LoadAsync();
+        await ReloadAsync();
     }
 
     [RelayCommand]
@@ -336,7 +339,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         // otherwise send them to the system settings page for the app.
         HasAccess = await gallery.Library.RequestAccessAsync();
         if (HasAccess)
-            await LoadAsync();
+            await ReloadAsync();
         else
             AppInfo.Current.ShowSettingsUI();
     }
