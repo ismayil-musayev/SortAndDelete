@@ -35,11 +35,13 @@
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">29.0</SupportedOSPlatformVersion>
 	</PropertyGroup>
 
-	<!-- R8 strips unused Java/Kotlin code from the DEX. It only shrinks: the .NET Android SDK
-	     always adds -dontobfuscate, because bindings reach Java classes and members by name. -->
+	<!-- R8 strips unused Java/Kotlin code from the DEX and renames what nothing reaches by name.
+	     The .NET Android SDK always adds -dontobfuscate, because bindings reach Java classes and
+	     members by name; R8Obfuscation.targets lifts it and keeps what JNI needs. -->
 	<PropertyGroup Condition="'$(Configuration)' == 'Release' and $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
 		<AndroidLinkTool>r8</AndroidLinkTool>
 	</PropertyGroup>
+	<Import Project="Platforms\Android\R8\R8Obfuscation.targets" Condition="'$(Configuration)' == 'Release' and $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'" />
 
 	<ItemGroup>
 		<!-- App Icon -->
