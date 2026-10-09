@@ -171,10 +171,16 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         }
         finally
         {
-            _loadInProgress = false;
-            IsLoading = false;
-            UpdateSelectionState(); // the months under the re-review selection may have changed
-            ended.SetResult();
+            try
+            {
+                _loadInProgress = false;
+                IsLoading = false;
+                UpdateSelectionState(); // the months under the re-review selection may have changed
+            }
+            finally
+            {
+                ended.SetResult(); // whatever happens, ReloadAsync must not wait forever
+            }
         }
     }
 

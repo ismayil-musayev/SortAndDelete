@@ -38,7 +38,7 @@ public partial class App : Application
 			catch (Exception)
 			{
 				// This runs on every return to the foreground, where a throw would close the app.
-				// The page stays as it was; a pull tries again.
+				// Whatever the load got through stays; a pull tries again.
 			}
 		};
 		return window;
