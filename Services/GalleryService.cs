@@ -27,6 +27,12 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     public ReviewStore Store => store;
 
     /// <summary>
+    /// When the latest load began, on <see cref="ChangeDebounce.Now"/>; null before the first. The
+    /// load reads the library as it is then or later.
+    /// </summary>
+    public TimeSpan? LoadStartedAt { get; private set; }
+
+    /// <summary>
     /// Every photo and video, loaded together with <see cref="GetAlbumsAsync"/> and kept until
     /// <see cref="Invalidate"/> or <see cref="MarkStale"/>.
     /// </summary>
@@ -88,6 +94,8 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
 
     private async Task LoadAsync(int version)
     {
+        LoadStartedAt = ChangeDebounce.Now;
+
         // The query and everything made from it run on the pool, so a big library doesn't hold up
         // the UI thread. Only setting the fields happens back here: the cache is touched on the
         // caller's thread alone.
