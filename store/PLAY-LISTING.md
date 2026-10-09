@@ -82,6 +82,11 @@ sharing location, personal info, digital purchases). Result: rated for everyone 
 **Data safety**:
 - Does your app collect or share any of the required user data types? → **No**
 - Result shown to users: "No data collected · No data shared"
+- Since 3.0 the app also holds `ACCESS_MEDIA_LOCATION`: it reads a photo's location
+  only so that a copy made during a move keeps it, on the device. "Collected" in Play's
+  sense means sent off the device, and the app has no network access, so the answer
+  stays **No**. If Play raises a question about the permission after upload, that is
+  the use to state.
 
 **Government app**: No. **Financial features**: none. **Health**: none.
 
@@ -103,13 +108,11 @@ Version 3.0 · versionCode 3
 ```
 Duplicates
 
-Finds the same photo even when the files are nothing alike — your camera original and the copy that came back over WhatsApp or Bluetooth, at a different size and quality.
+Finds the same photo even when the files are nothing alike — your camera original and the copy that came back over WhatsApp or Bluetooth.
 
-Five levels, from byte-for-byte certain to loosely similar, each showing how much it would find before you pick it. Videos too.
+Five levels, from byte-for-byte certain to loosely similar, each showing what it would find. Videos too. Nothing leaves your gallery until you empty the bin.
 
-The best copy is kept for you, and nothing leaves your gallery until you empty the bin.
-
-Also fixes a crash when reopening the app.
+Fixes: moving to folders that used to fail, moved photos keep their location, date and ⭐, the photo picker no longer asks twice, and a crash when reopening the app.
 ```
 
 ---
