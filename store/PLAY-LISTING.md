@@ -117,9 +117,10 @@ Also fixes a crash when reopening the app.
 ## Upload
 
 File to upload: `artifacts/SortAndDelete-v3.0.aab`
-Deobfuscation file: upload `artifacts/SortAndDelete-v3.0-mapping.txt` on the same release
-(App bundle explorer → the version → Downloads → ReTrace mapping file). R8 is on, so
-without it Play cannot map Java stack frames in crash reports.
+Deobfuscation file: the bundle carries it (`BUNDLE-METADATA/.../proguard.map`), so Play
+should attach it on its own. If the release shows no deobfuscation file, upload
+`artifacts/SortAndDelete-v3.0-mapping.txt` (App bundle explorer → the version →
+Downloads → ReTrace mapping file): without it Play cannot map Java crash frames.
 Track: **Internal testing** first (instant, installable via link),
 then promote to Production when the forms are done.
 
