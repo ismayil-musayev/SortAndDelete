@@ -210,4 +210,79 @@ public class FolderFilterTests
 
         Assert.Equal(["DCIM/Travel/", "Pictures/Travel/"], ordered.Select(folder => folder.Id));
     }
+
+    /// <summary><paramref name="count"/> items in the folder at <paramref name="relativePath"/>.</summary>
+    private static IEnumerable<PhotoAsset> In(string relativePath, int count) =>
+        Enumerable.Range(0, count).Select(i => new PhotoAsset { Id = $"{relativePath}#{i}", FolderPath = relativePath });
+
+    [Fact]
+    public void Folders_are_counted_from_the_items_in_them()
+    {
+        PhotoAsset[] photos =
+            [.. In("Pictures/Travel/", 2), .. In("/", 1), .. In("DCIM/Camera/", 3), .. In("Pictures/Travel/2024/", 1)];
+
+        var folders = FolderFilter.FoldersOf(photos);
+
+        Assert.Equal(["/", "Pictures/Travel/2024/", "DCIM/Camera/", "Pictures/Travel/"], folders.Select(folder => folder.Id));
+        Assert.Equal(["Main storage", "2024", "Camera", "Travel"], folders.Select(folder => folder.Name));
+        Assert.Equal([1, 1, 3, 2], folders.Select(folder => folder.Count));
+        Assert.All(folders, folder => Assert.Equal(folder.Id, folder.Subtitle));
+    }
+
+    [Fact]
+    public void Spellings_in_another_case_are_one_folder_under_the_most_common()
+    {
+        PhotoAsset[] photos = [.. In("dcim/Camera/", 1), .. In("DCIM/Camera/", 2)];
+
+        var folder = Assert.Single(FolderFilter.FoldersOf(photos));
+
+        Assert.Equal("DCIM/Camera/", folder.Id);
+        Assert.Equal("Camera", folder.Name);
+        Assert.Equal(3, folder.Count);
+    }
+
+    [Fact]
+    public void A_tie_between_spellings_goes_to_the_first_in_ordinal_order()
+    {
+        PhotoAsset[] lowerFirst = [.. In("pictures/trips/", 1), .. In("Pictures/Trips/", 1)];
+        PhotoAsset[] upperFirst = [.. In("Pictures/Trips/", 1), .. In("pictures/trips/", 1)];
+
+        Assert.Equal("Pictures/Trips/", Assert.Single(FolderFilter.FoldersOf(lowerFirst)).Id);
+        Assert.Equal("Pictures/Trips/", Assert.Single(FolderFilter.FoldersOf(upperFirst)).Id);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    public void Items_without_a_relative_path_are_in_no_folder(string relativePath)
+    {
+        PhotoAsset[] photos = [.. In(relativePath, 2), .. In("DCIM/Camera/", 1)];
+
+        Assert.Equal(["DCIM/Camera/"], FolderFilter.FoldersOf(photos).Select(folder => folder.Id));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("DCIM/Camera/")]
+    [InlineData("Pictures/New/")] // only on disk, with nothing in it
+    [InlineData(FolderFilter.FavoritesFolderId)]
+    public void The_items_give_the_same_chips_as_the_album_list(string? selected)
+    {
+        // The album list for the same library: the folders MediaStore knows with their counts, an
+        // empty folder found on disk, and a folder picked in the system browser.
+        AlbumInfo[] albums =
+        [
+            .. FolderFilter.InDisplayOrder(
+                [Folder("/", 1), Folder("DCIM/Camera/", 3), Folder("Pictures/Travel/", 2), Folder("Pictures/New/", 0)]),
+            Browsed,
+        ];
+        PhotoAsset[] photos = [.. In("Pictures/Travel/", 2), .. In("/", 1), .. In("DCIM/Camera/", 3)];
+
+        var fromAlbums = FolderFilter.Build(albums, favoriteCount: 2, selected);
+        var fromItems = FolderFilter.Build(FolderFilter.FoldersOf(photos), favoriteCount: 2, selected);
+
+        Assert.Equal(fromAlbums.Chips, fromItems.Chips);
+        Assert.Equal(fromAlbums.SelectedFolderId, fromItems.SelectedFolderId);
+        Assert.Equal(fromAlbums.FellBack, fromItems.FellBack);
+    }
 }

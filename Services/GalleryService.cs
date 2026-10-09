@@ -38,8 +38,9 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
 
     /// <summary>
     /// The albums the folder filter shows, from the same load as <see cref="GetPhotosAsync()"/>, so
-    /// their counts match the photos. Move targets come from the library itself: they need empty
-    /// and browsed folders as they are now.
+    /// their counts match the photos: on Android the folders counted from the photos themselves
+    /// (<see cref="FolderFilter.FoldersOf"/>), elsewhere the library's albums. Move targets come
+    /// from the library itself: they need empty and browsed folders as they are now.
     /// </summary>
     public async Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync()
     {
@@ -86,13 +87,23 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
 
     private async Task LoadAsync(int version)
     {
-        var photos = library.GetAllPhotosAsync();
-        var albums = library.GetAlbumsAsync();
-        await Task.WhenAll(photos, albums);
+#if ANDROID
+        // Every item carries its folder's relative path, so the photos give every folder with
+        // something in it. The library's album list also walks the folders on disk for empty
+        // ones, which the chips skip, and that walk can take longer than the photo load.
+        var photos = await library.GetAllPhotosAsync();
+        var albums = FolderFilter.FoldersOf(photos);
+#else
+        var loadingPhotos = library.GetAllPhotosAsync();
+        var loadingAlbums = library.GetAlbumsAsync();
+        await Task.WhenAll(loadingPhotos, loadingAlbums);
+        var photos = await loadingPhotos;
+        var albums = await loadingAlbums;
+#endif
 
-        _photos = [.. await photos];
+        _photos = [.. photos];
         _byId = _photos.ToDictionary(p => p.Id);
-        _albums = await albums;
+        _albums = albums;
         _folderMembers.Clear();
         _loadedVersion = version;
     }

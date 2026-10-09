@@ -58,6 +58,22 @@ public static class FolderFilter
         .ToList();
 
     /// <summary>
+    /// The folders that hold something, counted from the items in them (on Android every item
+    /// carries its folder's relative path), in <see cref="InDisplayOrder"/>. Spellings that differ
+    /// only in case are one folder, under the spelling most items use (the first in ordinal order
+    /// when tied). Items without a relative path are in no folder.
+    /// </summary>
+    public static List<AlbumInfo> FoldersOf(IEnumerable<PhotoAsset> photos) => InDisplayOrder(photos
+        .Select(photo => photo.FolderPath)
+        .Where(path => !string.IsNullOrWhiteSpace(path))
+        .GroupBy(path => path, IdComparer)
+        .Select(paths =>
+        {
+            var id = MostCommon(paths);
+            return new AlbumInfo { Id = id, Name = NameFor(id), Count = paths.Count(), Subtitle = id };
+        }));
+
+    /// <summary>
     /// The chip row: "All folders", then "⭐ Favourites" while there are favourites, then a chip
     /// for every album with something in it, in the albums' order. Folders picked in the system
     /// browser (count unknown, -1) and empty folders found on disk (0) get none: they would show
@@ -84,6 +100,13 @@ public static class FolderFilter
         chips[selected] = chips[selected] with { IsSelected = true };
         return new Row(chips, chips[selected].FolderId, fellBack);
     }
+
+    /// <summary>The spelling used most often, the first in ordinal order when tied.</summary>
+    private static string MostCommon(IEnumerable<string> spellings) => spellings
+        .GroupBy(spelling => spelling, StringComparer.Ordinal)
+        .OrderByDescending(same => same.Count())
+        .ThenBy(same => same.Key, StringComparer.Ordinal)
+        .First().Key;
 
     private static string[] Segments(string relativePath) =>
         relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
