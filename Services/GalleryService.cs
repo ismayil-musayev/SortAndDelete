@@ -12,16 +12,13 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     /// <summary>Pseudo-folder id for the system-wide favorites flag (Samsung/Google "Favourites").</summary>
     public const string FavoritesFolderId = FolderFilter.FavoritesFolderId;
 
-    private List<PhotoAsset>? _photos;
-    private Dictionary<string, PhotoAsset>? _byId;
-    private IReadOnlyList<AlbumInfo>? _albums;
-    private readonly Dictionary<string, IReadOnlySet<string>> _folderMembers = new(FolderFilter.IdComparer);
+    // The photo and album lists as the latest load read them. Reads, marks and invalidations all
+    // happen on the UI thread, and a load hands its snapshot back there (see VersionedLoad).
+    private readonly VersionedLoad<LibrarySnapshot> _snapshot = new(() => LoadAsync(library));
 
-    // Bumped whenever the library may have changed. The lists are current while they were
-    // loaded at the latest version.
-    private int _version;
-    private int _loadedVersion = -1;
-    private Task? _loading;
+    // The members of the folders filtered by so far, in the snapshot they were taken from.
+    private readonly Dictionary<string, IReadOnlySet<string>> _folderMembers = new(FolderFilter.IdComparer);
+    private LibrarySnapshot? _membersOf;
 
     public IPhotoLibraryService Library => library;
     public ReviewStore Store => store;
@@ -30,17 +27,13 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     /// When the latest load began, on <see cref="ChangeDebounce.Now"/>; null before the first. The
     /// load reads the library as it is then or later.
     /// </summary>
-    public TimeSpan? LoadStartedAt { get; private set; }
+    public TimeSpan? LoadStartedAt => _snapshot.LoadStartedAt;
 
     /// <summary>
     /// Every photo and video, loaded together with <see cref="GetAlbumsAsync"/> and kept until
     /// <see cref="Invalidate"/> or <see cref="MarkStale"/>.
     /// </summary>
-    public async Task<IReadOnlyList<PhotoAsset>> GetPhotosAsync()
-    {
-        await EnsureLoadedAsync();
-        return _photos!;
-    }
+    public async Task<IReadOnlyList<PhotoAsset>> GetPhotosAsync() => (await _snapshot.GetAsync()).Photos;
 
     /// <summary>
     /// The albums the folder filter shows, from the same load as <see cref="GetPhotosAsync()"/>: on
@@ -49,84 +42,38 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     /// loaded alongside. Move targets come from the library itself: they need empty and browsed
     /// folders as they are now.
     /// </summary>
-    public async Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync()
-    {
-        await EnsureLoadedAsync();
-        return _albums!;
-    }
+    public async Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync() => (await _snapshot.GetAsync()).Albums;
 
     /// <summary>Call after photos were deleted/moved outside the cache's knowledge.</summary>
-    public void Invalidate()
-    {
-        _photos = null;
-        _byId = null;
-        _albums = null;
-        _folderMembers.Clear();
-        _version++;
-    }
+    public void Invalidate() => _snapshot.Invalidate();
 
     /// <summary>
     /// Call when other apps may have changed the library, as while the app was in the background:
-    /// the next read loads it again. Until then <see cref="Find"/> answers from the list as loaded.
+    /// the reads from now on load it again, while a read already waiting keeps the load it waits
+    /// for. Until a load ends, <see cref="Find"/> answers from the list as loaded.
     /// </summary>
-    public void MarkStale() => _version++;
+    public void MarkStale() => _snapshot.MarkStale();
 
-    /// <summary>
-    /// Loads photos and albums together when they are missing or older than the latest version.
-    /// One load runs at a time, and a change marked while it runs means another load after it.
-    /// </summary>
-    private async Task EnsureLoadedAsync()
-    {
-        while (_photos is null || _loadedVersion != _version)
-        {
-            var loading = _loading ??= LoadAsync(_version);
-            try
-            {
-                await loading;
-            }
-            finally
-            {
-                if (_loading == loading)
-                    _loading = null;
-            }
-        }
-    }
-
-    private async Task LoadAsync(int version)
-    {
-        LoadStartedAt = ChangeDebounce.Now;
-
+    private static Task<LibrarySnapshot> LoadAsync(IPhotoLibraryService library) =>
         // The query and everything made from it run on the pool, so a big library doesn't hold up
-        // the UI thread. Only setting the fields happens back here: the cache is touched on the
-        // caller's thread alone.
-        var (photos, byId, albums) = await Task.Run(async () =>
+        // the UI thread.
+        Task.Run(async () =>
         {
 #if ANDROID
             // Every item carries its folder's relative path, so the photos give every folder with
             // something in it. The library's album list also walks the folders on disk for empty
             // ones, which the chips skip, and that walk can take longer than the photo load.
-            List<PhotoAsset> list = [.. await library.GetAllPhotosAsync()];
-            var folders = FolderFilter.FoldersOf(list);
+            return new LibrarySnapshot(await library.GetAllPhotosAsync(), FolderFilter.FoldersOf);
 #else
             var loadingPhotos = library.GetAllPhotosAsync();
             var loadingAlbums = library.GetAlbumsAsync();
             await Task.WhenAll(loadingPhotos, loadingAlbums);
-            List<PhotoAsset> list = [.. await loadingPhotos];
-            var folders = await loadingAlbums;
+            var albums = await loadingAlbums;
+            return new LibrarySnapshot(await loadingPhotos, _ => albums);
 #endif
-            var ids = list.ToDictionary(p => p.Id);
-            return (list, ids, folders);
         });
 
-        _photos = photos;
-        _byId = byId;
-        _albums = albums;
-        _folderMembers.Clear();
-        _loadedVersion = version;
-    }
-
-    public PhotoAsset? Find(string photoId) =>
-        _byId is not null && _byId.TryGetValue(photoId, out var photo) ? photo : null;
+    public PhotoAsset? Find(string photoId) => _snapshot.Value?.Find(photoId);
 
     /// <summary>
     /// Photos visible under a folder filter. On Android the folder id is a relative path we
@@ -135,12 +82,19 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     /// </summary>
     public async Task<IReadOnlyList<PhotoAsset>> GetPhotosAsync(string? folderId)
     {
-        var photos = await GetPhotosAsync();
+        var snapshot = await _snapshot.GetAsync();
+        var photos = snapshot.Photos;
         if (string.IsNullOrEmpty(folderId))
             return photos;
 
         if (FolderFilter.IdComparer.Equals(folderId, FavoritesFolderId))
             return photos.Where(p => p.IsFavorite).ToList();
+
+        if (_membersOf != snapshot)
+        {
+            _folderMembers.Clear();
+            _membersOf = snapshot;
+        }
 
         if (!_folderMembers.TryGetValue(folderId, out var members))
         {
