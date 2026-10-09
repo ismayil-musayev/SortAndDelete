@@ -92,7 +92,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     // Completes when the latest load has ended.
     private Task _loadEnded = Task.CompletedTask;
 
-    public async Task LoadAsync()
+    private async Task LoadAsync()
     {
         if (_loadInProgress)
             return;
@@ -154,9 +154,16 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
             }
             else
             {
+                // New rows keep the re-review selection of their month.
+                var selected = Months.Where(m => m.IsSelected).Select(m => m.MonthKey).ToHashSet();
                 Months.Clear();
                 foreach (var group in groups)
-                    Months.Add(new MonthCard(group, id => gallery.CreateThumbnail(id, 160)));
+                {
+                    Months.Add(new MonthCard(group, id => gallery.CreateThumbnail(id, 160))
+                    {
+                        IsSelected = selected.Contains(group.MonthKey),
+                    });
+                }
             }
 
             var lastKey = Preferences.Default.Get(LastMonthPreferenceKey, "");
@@ -166,6 +173,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         {
             _loadInProgress = false;
             IsLoading = false;
+            UpdateSelectionState(); // the months under the re-review selection may have changed
             ended.SetResult();
         }
     }
@@ -199,7 +207,10 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
             Folders.Add(new FolderChip(chip.FolderId, chip.Label) { IsSelected = chip.IsSelected });
     }
 
-    [RelayCommand]
+    // An async command takes no tap while a run is pending, and a run waits for the load in
+    // progress, so a later tap would be lost. Each tap sets the selection, and the taps waiting
+    // for the same load share one load after it (see ReloadAsync).
+    [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task SelectFolder(FolderChip? chip)
     {
         if (chip is null)

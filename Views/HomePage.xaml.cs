@@ -16,6 +16,6 @@ public partial class HomePage : ContentPage
     {
         base.OnAppearing();
         // Reload every time we come back — progress/bin counts change on other pages.
-        await _viewModel.LoadAsync();
+        await _viewModel.ReloadAsync();
     }
 }
