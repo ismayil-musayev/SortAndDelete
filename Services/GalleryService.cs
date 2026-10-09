@@ -88,22 +88,30 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
 
     private async Task LoadAsync(int version)
     {
+        // The query and everything made from it run on the pool, so a big library doesn't hold up
+        // the UI thread. Only setting the fields happens back here: the cache is touched on the
+        // caller's thread alone.
+        var (photos, byId, albums) = await Task.Run(async () =>
+        {
 #if ANDROID
-        // Every item carries its folder's relative path, so the photos give every folder with
-        // something in it. The library's album list also walks the folders on disk for empty
-        // ones, which the chips skip, and that walk can take longer than the photo load.
-        var photos = await library.GetAllPhotosAsync();
-        var albums = FolderFilter.FoldersOf(photos);
+            // Every item carries its folder's relative path, so the photos give every folder with
+            // something in it. The library's album list also walks the folders on disk for empty
+            // ones, which the chips skip, and that walk can take longer than the photo load.
+            List<PhotoAsset> list = [.. await library.GetAllPhotosAsync()];
+            var folders = FolderFilter.FoldersOf(list);
 #else
-        var loadingPhotos = library.GetAllPhotosAsync();
-        var loadingAlbums = library.GetAlbumsAsync();
-        await Task.WhenAll(loadingPhotos, loadingAlbums);
-        var photos = await loadingPhotos;
-        var albums = await loadingAlbums;
+            var loadingPhotos = library.GetAllPhotosAsync();
+            var loadingAlbums = library.GetAlbumsAsync();
+            await Task.WhenAll(loadingPhotos, loadingAlbums);
+            List<PhotoAsset> list = [.. await loadingPhotos];
+            var folders = await loadingAlbums;
 #endif
+            var ids = list.ToDictionary(p => p.Id);
+            return (list, ids, folders);
+        });
 
-        _photos = [.. photos];
-        _byId = _photos.ToDictionary(p => p.Id);
+        _photos = photos;
+        _byId = byId;
         _albums = albums;
         _folderMembers.Clear();
         _loadedVersion = version;
@@ -141,7 +149,10 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     {
         var photos = await GetPhotosAsync(folderId);
         var reviewedIds = await GetReviewedIdsAsync();
-        return MonthAggregator.Build(photos, reviewedIds);
+
+        // Built on the pool: nothing changes these photos meanwhile (a load replaces the list
+        // rather than changing it, and the sizes iOS fills in later aren't read here).
+        return await Task.Run(() => MonthAggregator.Build(photos, reviewedIds));
     }
 
     /// <summary>Builds the queue for a deck. Reviewed photos are skipped — resume for free.</summary>
