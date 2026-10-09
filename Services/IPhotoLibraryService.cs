@@ -70,6 +70,10 @@ public interface IPhotoLibraryService
     /// <summary>
     /// Moves photos to the system trash (Android 11+) or "Recently Deleted" (iOS), where the OS
     /// purges them after ~30 days. Shows the platform consent dialog. Returns true when confirmed.
+    /// Android 10 has no system trash: there they are deleted for good, through the folders the
+    /// user opens for the app in the system folder picker (once per folder). True means every one
+    /// is gone. False means not every one is: the user backed out of the folder picker (then none
+    /// is deleted), or a file couldn't be deleted (the others still are).
     /// </summary>
     Task<bool> MoveToSystemTrashAsync(IReadOnlyList<string> photoIds);
 

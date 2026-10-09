@@ -146,7 +146,9 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
 
         string message = SystemTrash
             ? $"Move {Items.Count} item(s) to the system trash? They will be permanently deleted by the system after ~30 days. Until then you can still get them back from the system trash (Android) or Photos → Recently Deleted (iOS)."
-            : $"Permanently delete {Items.Count} item(s)? Your device has no system trash — this CANNOT be undone.";
+            : $"Permanently delete {Items.Count} item(s)? Your device has no system trash — this CANNOT be undone. " +
+              "Android may ask you for access to the folders they are in, once per folder: on the next screen, " +
+              "allow access to the folder it opens on.";
 
         bool confirmed = await Shell.Current.DisplayAlertAsync("Empty bin", message,
             SystemTrash ? "Move to trash" : "Delete forever", "Cancel");
@@ -159,7 +161,17 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
             var ids = Items.Select(i => i.PhotoId).ToList();
             var ok = await gallery.Library.MoveToSystemTrashAsync(ids);
             if (!ok)
-                return; // user denied the system dialog — everything stays in the bin
+            {
+                // Everything stays in the bin. Android 11+ and iOS: the user denied the system dialog,
+                // nothing to explain. Android 10: the user backed out of the folder picker, or a file
+                // couldn't be deleted (the others were, and emptying again passes over them).
+                if (!SystemTrash)
+                    await Shell.Current.DisplayAlertAsync("Not everything was deleted",
+                        "You backed out of Android's folder screen, or a file couldn't be deleted, so the bin " +
+                        "still lists every item. Empty it again to finish, and allow access to the folder " +
+                        "Android opens on.", "OK");
+                return;
+            }
 
             await gallery.Store.MarkCommittedAsync(ids);
             gallery.Invalidate();
