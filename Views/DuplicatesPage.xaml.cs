@@ -19,7 +19,11 @@ public partial class DuplicatesPage : ContentPage
     protected override async void OnAppearing()
     {
         base.OnAppearing();
-        _visit = new CancellationTokenSource();
+
+        // A repeat call while the page is still up rejoins its visit: replaced, the first
+        // visit's scan would be left with nothing to stop it.
+        if (_visit is null || _visit.IsCancellationRequested)
+            _visit = new CancellationTokenSource();
         await _viewModel.LoadAsync(_visit.Token);
     }
 

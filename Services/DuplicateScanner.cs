@@ -310,8 +310,10 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
                     {
                         await work(items[index]);
                     }
-                    catch (OperationCanceledException)
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
                     {
+                        // The scan was stopped. Any other cancellation is one more unreadable
+                        // item, below.
                         throw;
                     }
                     catch
