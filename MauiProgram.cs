@@ -29,8 +29,8 @@ public static class MauiProgram
 		builder.Services.AddSingleton<IPhotoLibraryService, IosPhotoLibraryService>();
 #endif
 
-		// Changes made to the library while the app is in the foreground. On iOS a
-		// PHPhotoLibraryChangeObserver would watch here, registered in Start and unregistered in Stop.
+		// Changes made to the library while the app is in the foreground. iOS has no watcher yet: a
+		// PHPhotoLibraryChangeObserver could plug in here, registered in Start and unregistered in Stop.
 #if ANDROID
 		builder.Services.AddSingleton<ILibraryChangeWatcher, AndroidLibraryChangeWatcher>();
 #else

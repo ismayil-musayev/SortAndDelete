@@ -12,7 +12,7 @@ public class FolderWalkCacheTests
     {
         public int Runs { get; private set; }
 
-        /// <summary>What happens on other threads while the walk runs.</summary>
+        /// <summary>Runs inside the walk, in place of what other threads would do while it runs.</summary>
         public Action? Meanwhile { get; init; }
 
         public IReadOnlyList<string> Run()
@@ -85,16 +85,23 @@ public class FolderWalkCacheTests
     }
 
     [Fact]
-    public void Lists_and_invalidations_on_many_threads_always_give_a_whole_walk()
+    public void Lists_and_invalidations_on_many_threads_always_give_one_whole_walk()
     {
         var cache = new FolderWalkCache();
 
         Parallel.For(0, 3_000, i =>
         {
             if (i % 10 == 0)
+            {
                 cache.Invalidate();
-            else
-                Assert.Equal(OnDisk, cache.Folders(new Walk(OnDisk).Run));
+                return;
+            }
+
+            // Every walk finds folders of its own, so an answer pieced together from two walks shows.
+            var answer = cache.Folders(new Walk($"Pictures/{i}/", $"Pictures/{i}/a/", $"Pictures/{i}/b/").Run);
+
+            var walk = answer[0].Split('/')[1];
+            Assert.Equal([$"Pictures/{walk}/", $"Pictures/{walk}/a/", $"Pictures/{walk}/b/"], answer);
         });
     }
 }

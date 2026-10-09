@@ -19,7 +19,8 @@ public sealed class AndroidLibraryChangeWatcher : ILibraryChangeWatcher
     // still shows within a couple of seconds.
     private static readonly TimeSpan QuietPeriod = TimeSpan.FromSeconds(1.5);
 
-    // Changes that never pause for a quiet period, a long copy for instance, still show this often.
+    // Changes that never pause for a quiet period, a long copy for instance, are still reported at
+    // least this often.
     private static readonly TimeSpan LongestWait = TimeSpan.FromSeconds(10);
 
     private readonly Handler _mainThread = new(Looper.MainLooper!);
