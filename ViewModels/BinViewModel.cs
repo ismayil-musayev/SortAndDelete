@@ -124,8 +124,10 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
         try
         {
             var ok = await gallery.Library.RestoreFromSystemTrashAsync([item.PhotoId]);
+            // False: the user denied the system dialog, or Android didn't restore it although its
+            // dialog reported success (the service checks the gallery). It stays listed either way.
             if (!ok)
-                return; // user denied the system dialog
+                return;
 
             await gallery.Store.RemoveAsync(item.PhotoId); // unreviewed again
             CommittedItems.Remove(item);
@@ -162,9 +164,12 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
             var ok = await gallery.Library.MoveToSystemTrashAsync(ids);
             if (!ok)
             {
-                // Everything stays in the bin. Android 11+ and iOS: the user denied the system dialog,
-                // nothing to explain. Android 10: the user backed out of the folder picker, or a file
-                // couldn't be deleted (the others were, and emptying again passes over them).
+                // Everything stays in the bin. Android 11+: the user denied the system dialog, or Android
+                // didn't trash every item although its dialog reported success (the service checks the
+                // gallery); this can't tell the two apart, so nothing to explain, and the next empty
+                // sends every item again, those Android did trash too. iOS: the user denied the system
+                // dialog. Android 10: the user backed out of the folder picker, or a file couldn't be
+                // deleted (the others were, and emptying again passes over them).
                 if (!SystemTrash)
                     await Shell.Current.DisplayAlertAsync("Not everything was deleted",
                         "You backed out of Android's folder screen, or a file couldn't be deleted, so the bin " +

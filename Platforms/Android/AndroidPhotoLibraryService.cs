@@ -33,10 +33,11 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     /// <summary>
     /// createTrashRequest/createWriteRequest reject files-table URIs ("All requested items
     /// must be Media items"), and Android 10 makes no thumbnails for them — both need typed
-    /// images/video URIs. We remember each id's kind from queries and fall back to a
-    /// trashed-inclusive lookup for unknown ids.
+    /// images/video URIs, and trash and write requests need them on the item's own volume (see
+    /// <see cref="TypedUriFor"/>). We remember each id's kind and volume from queries and fall
+    /// back to a trashed-inclusive lookup for unknown ids.
     /// </summary>
-    private readonly Dictionary<string, MediaKind> _kindCache = [];
+    private readonly Dictionary<string, (MediaKind Kind, string VolumeName)> _kindCache = [];
 
     /// <summary>Android 11+ has a real system trash with the 30-day auto purge.</summary>
     public bool SupportsSystemTrash => OperatingSystem.IsAndroidVersionAtLeast(30);
@@ -95,6 +96,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             MediaStore.Images.Media.InterfaceConsts.DisplayName,
             ColMediaType,
             ColDuration,
+            ColVolumeName,
         ];
         if (hasFavoriteColumn)
             projection.Add(ColIsFavorite);
@@ -122,6 +124,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         int nameCol = cursor.GetColumnIndexOrThrow(MediaStore.Images.Media.InterfaceConsts.DisplayName);
         int typeCol = cursor.GetColumnIndexOrThrow(ColMediaType);
         int durationCol = cursor.GetColumnIndexOrThrow(ColDuration);
+        int volumeCol = cursor.GetColumnIndexOrThrow(ColVolumeName);
         int favoriteCol = hasFavoriteColumn ? cursor.GetColumnIndexOrThrow(ColIsFavorite) : -1;
 
         while (cursor.MoveToNext())
@@ -137,9 +140,10 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             bool isVideo = cursor.GetInt(typeCol) == MediaTypeVideo;
             string relativePath = cursor.IsNull(pathCol) ? "" : cursor.GetString(pathCol) ?? "";
             string id = cursor.GetLong(idCol).ToString();
+            string volumeName = cursor.IsNull(volumeCol) ? "" : cursor.GetString(volumeCol) ?? "";
 
             lock (_kindCache)
-                _kindCache[id] = isVideo ? MediaKind.Video : MediaKind.Image;
+                _kindCache[id] = (isVideo ? MediaKind.Video : MediaKind.Image, volumeName);
 
             list.Add(new PhotoAsset
             {
@@ -168,7 +172,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
 
                 bool isVideo;
                 lock (_kindCache)
-                    isVideo = _kindCache.GetValueOrDefault(photoId) == MediaKind.Video;
+                    isVideo = _kindCache.GetValueOrDefault(photoId).Kind == MediaKind.Video;
 
                 // Big requests (the swipe card) decode the ORIGINAL file — LoadThumbnail
                 // often serves a small cached thumbnail regardless of the requested size,
@@ -400,12 +404,19 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             {
                 // System trash: auto-purged by Android after ~30 days; the same API restores (value=false).
                 var pending = MediaStore.CreateTrashRequest(Resolver, uris, trashed);
-                return await IntentSenderLauncher.LaunchAsync(pending.IntentSender);
+                if (!await IntentSenderLauncher.LaunchAsync(pending.IntentSender))
+                    return false;
             }
             catch (Java.Lang.Exception)
             {
                 return false; // e.g. item vanished or provider rejected the request
             }
+
+            // The consent screen reports success even when MediaStore refuses the change (it
+            // swallows the error, as for an SD card item asked for through "external"), so only the
+            // gallery can tell: every item has left it (trashed), or is back in it (restored). A query
+            // that fails tells nothing, so that item counts as not done.
+            return await Task.Run(() => photoIds.All(id => GalleryHas(id) == !trashed));
         }
 
         if (!trashed)
@@ -961,12 +972,12 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     /// <summary>
     /// Moves the item itself, after the write consent Android asks for: same id, every detail
     /// kept. Consent and move both go through the item's uri on its own volume
-    /// (<see cref="TypedUriOnItsVolume"/>), so an item on an SD card moves within its card.
+    /// (<see cref="TypedUriFor"/>), so an item on an SD card moves within its card.
     /// <paramref name="copyInstead"/> runs when MediaStore still refuses the move.
     /// </summary>
     private async Task<MoveResult> MoveInPlaceAsync(MoveJob job, string relativePath, Func<Task<MoveResult>> copyInstead)
     {
-        var uri = TypedUriOnItsVolume(job);
+        var uri = TypedUriFor(job.PhotoId, job.Kind, job.Source.VolumeName);
         bool moved;
         try
         {
@@ -1012,28 +1023,6 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         // Moved in place: same id, all metadata intact. Otherwise copy, then remove the original.
         return moved ? MoveResult.Moved(job.PhotoId) : await copyInstead();
     }
-
-    /// <summary>
-    /// The item's typed uri on its own volume. MediaStore works out where a moved item goes on the
-    /// volume its uri names, and up to Android 15 "external" names internal storage: through it,
-    /// an item on an SD card would have to leave its card, which Android refuses ("Changing volume
-    /// … not allowed"; Android 16 reads "external" as the item's own volume). So an SD card item
-    /// goes through its card's volume ("1a2b-3c4d"). The write consent covers only the exact uri
-    /// it was asked for, so it is asked for this one too.
-    /// </summary>
-    private static AndroidUri TypedUriOnItsVolume(MoveJob job)
-    {
-        if (IsOnInternalStorage(job.Source))
-            return TypedUriFor(job.PhotoId, job.Kind);
-
-        var collection = job.Kind == MediaKind.Video
-            ? MediaStore.Video.Media.GetContentUri(job.Source.VolumeName)
-            : MediaStore.Images.Media.GetContentUri(job.Source.VolumeName);
-        return ContentUris.WithAppendedId(collection!, long.Parse(job.PhotoId));
-    }
-
-    private static bool IsOnInternalStorage(SourceInfo source) =>
-        source.VolumeName is "" or "external" or "external_primary";
 
     private static string RefusedMove(AlbumInfo album) => $"Android refused to move it into {album.Name}.";
 
@@ -1135,7 +1124,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     {
         await ResolveTypedUrisAsync([photoId]); // fills the kind cache
         lock (_kindCache)
-            return _kindCache.GetValueOrDefault(photoId, MediaKind.Image);
+            return _kindCache.TryGetValue(photoId, out var known) ? known.Kind : MediaKind.Image;
     }
 
     private sealed record SourceInfo(
@@ -1520,7 +1509,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         var published = copy!;
         var newId = ContentUris.ParseId(published).ToString();
         lock (_kindCache)
-            _kindCache[newId] = job.Kind;
+            _kindCache[newId] = (job.Kind, "external_primary"); // inserted through "external": internal storage
 
         if (!await Task.Run(() => KeepDate(published, source)) && !await ConfirmRedatingAsync(job))
         {
@@ -1587,17 +1576,20 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     /// Whether the gallery still has the item: not deleted, and not in the system trash. Asks the
     /// collection: a query on the item's own uri finds it in the trash too. Blocking.
     /// </summary>
-    private static bool IsInGallery(string photoId)
+    private static bool IsInGallery(string photoId) => GalleryHas(photoId) ?? false;
+
+    /// <summary><see cref="IsInGallery"/>, or null when the query fails, so it can't be told. Blocking.</summary>
+    private static bool? GalleryHas(string photoId)
     {
         try
         {
             using var cursor = Resolver.Query(FilesUri, [MediaStore.Images.Media.InterfaceConsts.Id],
                 $"{MediaStore.Images.Media.InterfaceConsts.Id} = ?", [photoId], null);
-            return cursor is not null && cursor.MoveToFirst();
+            return cursor?.MoveToFirst();
         }
         catch
         {
-            return false;
+            return null;
         }
     }
 
@@ -1936,11 +1928,8 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             return MoveResult.Cancelled;
         }
 
-        if (newId is not null)
-        {
-            lock (_kindCache)
-                _kindCache[newId] = job.Kind;
-        }
+        // The copy's kind and volume aren't cached: it can be on any volume, which the lookup reads
+        // when the copy is first needed (see ResolveTypedUris).
         return await FinishMoveAsync(job, copied, newId, () => TryDeleteDocument(named));
     }
 
@@ -2140,23 +2129,41 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     private static AndroidUri UriFor(string photoId) =>
         ContentUris.WithAppendedId(FilesUri, long.Parse(photoId));
 
-    private static AndroidUri TypedUriFor(string photoId, MediaKind kind) =>
-        ContentUris.WithAppendedId(
-            kind == MediaKind.Video
-                ? MediaStore.Video.Media.ExternalContentUri!
-                : MediaStore.Images.Media.ExternalContentUri!,
-            long.Parse(photoId));
+    /// <summary>
+    /// The item's typed uri on its own volume (<paramref name="volumeName"/>, MediaStore's
+    /// volume_name). MediaStore works out where a moved, trashed or restored item goes on the
+    /// volume its uri names (trashing renames it to .trashed-…), and up to Android 15 "external"
+    /// names internal storage: through it, an item on an SD card would have to leave its card,
+    /// which Android refuses ("Changing volume … not allowed"; Android 16 reads "external" as the
+    /// item's own volume). So an SD card item goes through its card's volume ("1a2b-3c4d"), and an
+    /// item on internal storage through "external", as ever. A consent covers only the exact uri
+    /// it was asked for, so it is asked for this one too.
+    /// </summary>
+    private static AndroidUri TypedUriFor(string photoId, MediaKind kind, string volumeName)
+    {
+        if (IsInternalStorage(volumeName))
+            return ContentUris.WithAppendedId(TypedCollectionFor(kind), long.Parse(photoId));
+
+        var collection = kind == MediaKind.Video
+            ? MediaStore.Video.Media.GetContentUri(volumeName)
+            : MediaStore.Images.Media.GetContentUri(volumeName);
+        return ContentUris.WithAppendedId(collection!, long.Parse(photoId));
+    }
+
+    private static bool IsInternalStorage(string volumeName) =>
+        volumeName is "" or "external" or "external_primary";
 
     /// <summary><see cref="ResolveTypedUris"/>, off the calling thread.</summary>
     private Task<List<AndroidUri>> ResolveTypedUrisAsync(IReadOnlyList<string> photoIds) =>
         Task.Run(() => ResolveTypedUris(photoIds));
 
     /// <summary>
-    /// Each item's typed uri (images/media or video/media), for what takes no other: consent
-    /// requests, and thumbnails on Android 10, whose MediaProvider makes them only for typed
-    /// uris (a files-table one throws FileNotFoundException; Android 11 resolves it to its
-    /// type). Kinds come from the cache; ids it doesn't know yet are looked up first, in one
-    /// query that finds items in the system trash too (the gallery doesn't list those). Blocking.
+    /// Each item's typed uri (images/media or video/media) on its own volume (see
+    /// <see cref="TypedUriFor"/>), for what takes no other: consent requests, and thumbnails on
+    /// Android 10, whose MediaProvider makes them only for typed uris (a files-table one throws
+    /// FileNotFoundException; Android 11 resolves it to its type). Kinds and volumes come from the
+    /// cache; ids it doesn't know yet are looked up first, in one query that finds items in the
+    /// system trash too (the gallery doesn't list those). Blocking.
     /// </summary>
     private List<AndroidUri> ResolveTypedUris(IReadOnlyList<string> photoIds)
     {
@@ -2169,7 +2176,9 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
 
         lock (_kindCache)
             return photoIds
-                .Select(id => TypedUriFor(id, _kindCache.GetValueOrDefault(id, MediaKind.Image)))
+                .Select(id => _kindCache.TryGetValue(id, out var known)
+                    ? TypedUriFor(id, known.Kind, known.VolumeName)
+                    : TypedUriFor(id, MediaKind.Image, "")) // not found: the image uri, as ever
                 .ToList();
     }
 
@@ -2184,7 +2193,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             if (OperatingSystem.IsAndroidVersionAtLeast(30))
                 args.PutInt(MediaStore.QueryArgMatchTrashed, 1); // MATCH_INCLUDE — restore path needs trashed rows
 
-            using var cursor = Resolver.Query(FilesUri, ["_id", ColMediaType], args, null);
+            using var cursor = Resolver.Query(FilesUri, ["_id", ColMediaType, ColVolumeName], args, null);
             if (cursor is null)
                 return;
 
@@ -2192,8 +2201,9 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             {
                 var id = cursor.GetLong(0).ToString();
                 var kind = cursor.GetInt(1) == MediaTypeVideo ? MediaKind.Video : MediaKind.Image;
+                var volumeName = cursor.IsNull(2) ? "" : cursor.GetString(2) ?? "";
                 lock (_kindCache)
-                    _kindCache[id] = kind;
+                    _kindCache[id] = (kind, volumeName);
             }
         }
         catch

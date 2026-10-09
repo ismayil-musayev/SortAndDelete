@@ -157,17 +157,20 @@ workload). Android 10 (API 29)+ / iOS 15+.
 
 Gotcha worth knowing: `createTrashRequest`/`createWriteRequest` require **typed** media URIs
 (`images/media`, `video/media`) — files-table URIs are rejected. The Android service resolves
-each id's media kind (including trashed rows via `QUERY_ARG_MATCH_TRASHED`) before building
-consent requests. Android 10's `loadThumbnail` needs typed uris too: its MediaProvider makes
-thumbnails only for those and fails a files-table uri with `FileNotFoundException` (Android 11
-resolves one to its type), so thumbnails and duplicate fingerprints go through typed uris on every
-version. And a query on an item's own uri finds it even in the system trash
+each id's media kind and volume (including trashed rows via `QUERY_ARG_MATCH_TRASHED`) before
+building consent requests. Android 10's `loadThumbnail` needs typed uris too: its MediaProvider
+makes thumbnails only for those and fails a files-table uri with `FileNotFoundException`
+(Android 11 resolves one to its type), so thumbnails and duplicate fingerprints go through typed
+uris on every version. And a query on an item's own uri finds it even in the system trash
 (`is_trashed=1`); whether the gallery still has it is a question for the collection. The uri
-also names the volume: MediaStore puts a moved item on the volume its uri names, and `external`
-means internal storage, so an item on an SD card is moved (and its write consent asked for)
-through `content://media/<its volume>/…/<id>`. Through `external`, Android 10 to 15 refuse the
-move ("Changing volume … not allowed"); Android 16's MediaStore rewrites `external` to the item's
-volume.
+also names the volume: MediaStore puts a moved item on the volume its uri names, and renames a
+trashed item to `.trashed-…` (and a restored one back) on that volume too. `external` means
+internal storage, so an item on an SD card is moved, trashed and restored (and its consent asked
+for) through `content://media/<its volume>/…/<id>`. Through `external`, Android 10 to 15 refuse
+the change ("Changing volume … not allowed"); Android 16's MediaStore rewrites `external` to the
+item's volume. The system consent screen reports success even when that update fails (it swallows
+the error), so after a trash or restore request the app checks that every item really left the
+gallery, or is back in it.
 
 The in-app bin exists precisely so that *accidental* swipes are always recoverable in one tap,
 regardless of platform restrictions.
