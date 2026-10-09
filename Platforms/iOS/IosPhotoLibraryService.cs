@@ -139,12 +139,27 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
             PHImageManager.DefaultManager.RequestImageForAsset(
                 asset,
                 new CGSize(ThumbnailSourceSize, ThumbnailSourceSize),
-                PHImageContentMode.AspectFill,
+                // Fit, not Fill: Apple documents an exact resize as cropping Fill to the square,
+                // where Android squashes the whole photo.
+                PHImageContentMode.AspectFit,
                 options,
                 (image, _) =>
                 {
-                    if (image?.CGImage is { } frame)
-                        pixels = ToPackedRgb(frame, size);
+                    // Nothing may throw back into native code. Both wrappers go now: a scan makes
+                    // little managed garbage, so the GC might leave the bitmap alive for a long time.
+                    try
+                    {
+                        using (image)
+                        using (var frame = image?.CGImage)
+                        {
+                            if (frame is not null)
+                                pixels = ToPackedRgb(frame, size);
+                        }
+                    }
+                    catch
+                    {
+                        // unreadable — the item simply never matches
+                    }
                 });
             return pixels;
         }, ct);
@@ -162,44 +177,61 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
                 DeliveryMode = PHVideoRequestOptionsDeliveryMode.HighQualityFormat,
             };
 
-            byte[]? pixels = null;
-            using var finished = new SemaphoreSlim(0, 1);
+            AVAsset? delivered = null;
 
-            PHImageManager.DefaultManager.RequestAvAsset(asset, options, (video, _, _) =>
+            // Photos calls back on a queue of its choosing, possibly after this has given up, and
+            // an exception thrown back into native code ends the app: the handler only hands the
+            // clip over, and the semaphore, never disposed and with no maximum, can't throw.
+            var finished = new SemaphoreSlim(0);
+
+            int request = PHImageManager.DefaultManager.RequestAVAsset(asset, options, (video, _, _) =>
             {
-                try
-                {
-                    if (video is null)
-                        return;
-
-                    using var generator = new AVAssetImageGenerator(video)
-                    {
-                        AppliesPreferredTrackTransform = true,
-
-                        // Exact, not nearest-keyframe: a re-encode lays its keyframes out
-                        // differently, so snapping to one would sample a different moment in
-                        // each copy and the frames would never line up.
-                        RequestedTimeToleranceBefore = CMTime.Zero,
-                        RequestedTimeToleranceAfter = CMTime.Zero,
-                    };
-
-                    var at = CMTime.FromSeconds(video.Duration.Seconds * Math.Clamp(position, 0, 1), 600);
-                    using var frame = generator.CopyCGImageAtTime(at, out _, out var error);
-                    if (frame is not null && error is null)
-                        pixels = ToPackedRgb(frame, size);
-                }
-                catch
-                {
-                    // leave the frame unsampled — the clip just never matches
-                }
-                finally
-                {
-                    finished.Release();
-                }
+                delivered = video;
+                finished.Release();
             });
 
-            finished.Wait(TimeSpan.FromSeconds(30));
-            return pixels;
+            bool answered = false;
+            try
+            {
+                answered = finished.Wait(TimeSpan.FromSeconds(30), ct);
+            }
+            finally
+            {
+                // Timed out or cancelled: stop Photos fetching the clip, perhaps from iCloud.
+                if (!answered)
+                    PHImageManager.DefaultManager.CancelImageRequest(request);
+            }
+
+            using var clip = answered ? delivered : null;
+            if (clip is null)
+                return null;
+
+            // Decoded here, not in the handler: that would hold up Photos' queue, and spend the
+            // 30 seconds the fetch gets.
+            try
+            {
+                using var generator = new AVAssetImageGenerator(clip)
+                {
+                    AppliesPreferredTrackTransform = true,
+
+                    // The box Android's GetScaledFrameAtTime fits its frame into.
+                    MaximumSize = new CGSize(ThumbnailSourceSize, ThumbnailSourceSize),
+
+                    // Exact, not nearest-keyframe: a re-encode lays its keyframes out
+                    // differently, so snapping to one would sample a different moment in
+                    // each copy and the frames would never line up.
+                    RequestedTimeToleranceBefore = CMTime.Zero,
+                    RequestedTimeToleranceAfter = CMTime.Zero,
+                };
+
+                var at = CMTime.FromSeconds(clip.Duration.Seconds * Math.Clamp(position, 0, 1), 600);
+                using var frame = generator.CopyCGImageAtTime(at, out _, out var error);
+                return frame is not null && error is null ? ToPackedRgb(frame, size) : null;
+            }
+            catch
+            {
+                return null; // leave the frame unsampled — the clip just never matches
+            }
         }, ct);
 
     public Task<string?> ComputeContentHashAsync(string photoId, CancellationToken ct = default) =>
@@ -209,41 +241,75 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
             if (asset is null)
                 return null;
 
-            var resources = PHAssetResource.GetAssetResources(asset);
-            var resource = resources.FirstOrDefault(r =>
-                    r.ResourceType is PHAssetResourceType.Photo or PHAssetResourceType.Video)
-                ?? resources.FirstOrDefault();
+            // Edits never touch the original, so an edited copy would hash like its unedited twin.
+            if (asset.HasAdjustments)
+                return null;
+
+            // The original only, never an edited rendition or another of the asset's resources.
+            var resource = PHAssetResource.GetAssetResources(asset).FirstOrDefault(r =>
+                r.ResourceType is PHAssetResourceType.Photo or PHAssetResourceType.Video);
             if (resource is null)
                 return null;
 
-            using var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            using var finished = new SemaphoreSlim(0, 1);
+            // Photos calls back one call at a time on a serial queue of its own, possibly after
+            // this has given up, and an exception thrown back into native code ends the app. So
+            // only the callbacks touch the hasher (the completion disposes it), and the semaphore
+            // is never disposed and has no maximum, so Release can't throw.
+            var hasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var finished = new SemaphoreSlim(0);
             bool failed = false;
+            string? hash = null;
 
             using var options = new PHAssetResourceRequestOptions { NetworkAccessAllowed = true };
-            PHAssetResourceManager.DefaultManager.RequestData(
+            int request = PHAssetResourceManager.DefaultManager.RequestData(
                 resource,
                 options,
-                data => hasher.AppendData(data.ToArray()),
+                data =>
+                {
+                    try
+                    {
+                        hasher.AppendData(data.ToArray());
+                    }
+                    catch
+                    {
+                        failed = true;
+                    }
+                },
                 error =>
                 {
-                    failed = error is not null;
+                    try
+                    {
+                        if (!failed && error is null)
+                            hash = Convert.ToHexString(hasher.GetHashAndReset());
+                        hasher.Dispose();
+                    }
+                    catch
+                    {
+                        // no hash — the file just never matches
+                    }
                     finished.Release();
                 });
 
-            if (!finished.Wait(TimeSpan.FromMinutes(5)))
-                return null;
-
-            return failed ? null : Convert.ToHexString(hasher.GetHashAndReset());
+            bool completed = false;
+            try
+            {
+                completed = finished.Wait(TimeSpan.FromMinutes(5), ct);
+            }
+            finally
+            {
+                // Timed out or cancelled: stop Photos reading, perhaps downloading, the rest.
+                if (!completed)
+                    PHAssetResourceManager.DefaultManager.CancelDataRequest(request);
+            }
+            return completed ? hash : null;
         }, ct);
 
     /// <summary>
     /// Squashes the image into a square and unpacks it to RGB triples.
     /// </summary>
     /// <remarks>
-    /// Core Graphics draws from the bottom left, so these grids come out vertically mirrored
-    /// against the Android ones. That is harmless: fingerprints are only ever compared with
-    /// others from the same device, and never travel.
+    /// Rows come out top first, as on Android. Core Graphics' origin is at the bottom left, but
+    /// DrawImage draws the image upright, and a bitmap context stores its top row first.
     /// </remarks>
     private static byte[] ToPackedRgb(CGImage image, int size)
     {
