@@ -122,13 +122,40 @@ public class FolderFilterTests
     }
 
     [Fact]
-    public void A_selection_matches_folder_ids_exactly()
+    public void A_selection_in_another_case_keeps_its_chip()
     {
-        // "Pictures/Travel/" is listed; the same path spelled in lower case is not its chip.
+        // Shared storage ignores case: "pictures/travel/" is the listed "Pictures/Travel/".
         var row = FolderFilter.Build(Gallery, favoriteCount: 0, "pictures/travel/");
 
+        Assert.Equal("Pictures/Travel/", Assert.Single(row.Chips, chip => chip.IsSelected).FolderId);
+        Assert.Equal("Pictures/Travel/", row.SelectedFolderId);
+        Assert.False(row.FellBack);
+    }
+
+    [Fact]
+    public void No_folder_is_not_the_storage_root()
+    {
+        // "" is no relative path at all, so in no folder; "/" is the storage root, listed here.
+        var row = FolderFilter.Build(Gallery, favoriteCount: 0, "");
+
+        Assert.Equal("All folders", Assert.Single(row.Chips, chip => chip.IsSelected).Label);
         Assert.Null(row.SelectedFolderId);
         Assert.True(row.FellBack);
+    }
+
+    [Theory]
+    [InlineData("DCIM/Camera/", "dcim/Camera/", true)]
+    [InlineData("Pictures/Travel/", "PICTURES/TRAVEL/", true)]
+    [InlineData("/", "/", true)]
+    [InlineData("/", "", false)]
+    [InlineData("DCIM/Camera/", "DCIM/Camera", false)]
+    [InlineData("DCIM/Camera/", "DCIM/Camera2/", false)]
+    public void Folder_ids_compare_ignoring_case_and_otherwise_exactly(string id, string other, bool same)
+    {
+        Assert.Equal(same, FolderFilter.IdComparer.Equals(id, other));
+        Assert.Equal(same, FolderFilter.IdComparer.Equals(other, id));
+        if (same)
+            Assert.Equal(FolderFilter.IdComparer.GetHashCode(id), FolderFilter.IdComparer.GetHashCode(other));
     }
 
     [Fact]

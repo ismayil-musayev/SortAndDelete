@@ -17,6 +17,14 @@ public static class FolderFilter
     /// <summary>Pseudo-folder id for the system-wide favorites flag (Samsung/Google "Favourites").</summary>
     public const string FavoritesFolderId = "sortanddelete:favorites";
 
+    /// <summary>
+    /// How folder ids compare: ignoring case, otherwise exactly. Shared storage ignores case, so
+    /// "DCIM/Camera/" and "dcim/Camera/" are one folder, while "/" (the storage root) and "" (no
+    /// relative path, so in no folder) stay apart. iOS ids are generated localIdentifiers, so
+    /// ignoring case is harmless there.
+    /// </summary>
+    public static StringComparer IdComparer { get; } = StringComparer.OrdinalIgnoreCase;
+
     /// <summary>One chip: the folder it filters to (null for All), its label, and whether it is selected.</summary>
     public readonly record struct Chip(string? FolderId, string Label, bool IsSelected = false);
 
@@ -46,15 +54,16 @@ public static class FolderFilter
     public static List<AlbumInfo> InDisplayOrder(IEnumerable<AlbumInfo> folders) => folders
         .OrderBy(folder => IsStorageRoot(folder.Id) ? 0 : 1)
         .ThenBy(folder => folder.Name, StringComparer.CurrentCultureIgnoreCase)
-        .ThenBy(folder => folder.Id, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(folder => folder.Id, IdComparer)
         .ToList();
 
     /// <summary>
     /// The chip row: "All folders", then "⭐ Favourites" while there are favourites, then a chip
     /// for every album with something in it, in the albums' order. Folders picked in the system
     /// browser (count unknown, -1) and empty folders found on disk (0) get none: they would show
-    /// nothing. The chip whose folder id is exactly <paramref name="selectedFolderId"/> (null for
-    /// All) is selected; when there is none (the folder emptied, or its photos moved), All is.
+    /// nothing. The chip whose folder id matches <paramref name="selectedFolderId"/> by
+    /// <see cref="IdComparer"/> (null for All) is selected, and the selection takes the chip's
+    /// spelling; when there is none (the folder emptied, or its photos moved), All is.
     /// </summary>
     public static Row Build(IEnumerable<AlbumInfo> albums, int favoriteCount, string? selectedFolderId)
     {
@@ -67,7 +76,7 @@ public static class FolderFilter
         foreach (var album in albums.Where(a => a.Count > 0))
             chips.Add(new Chip(album.Id, $"{album.Name} · {album.Count}"));
 
-        int selected = chips.FindIndex(chip => chip.FolderId == selectedFolderId);
+        int selected = chips.FindIndex(chip => IdComparer.Equals(chip.FolderId, selectedFolderId));
         bool fellBack = selected < 0;
         if (fellBack)
             selected = 0; // All

@@ -15,7 +15,7 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     private List<PhotoAsset>? _photos;
     private Dictionary<string, PhotoAsset>? _byId;
     private IReadOnlyList<AlbumInfo>? _albums;
-    private readonly Dictionary<string, IReadOnlySet<string>> _folderMembers = [];
+    private readonly Dictionary<string, IReadOnlySet<string>> _folderMembers = new(FolderFilter.IdComparer);
 
     // Bumped whenever the library may have changed. The lists are current while they were
     // loaded at the latest version.
@@ -102,7 +102,9 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
 
     /// <summary>
     /// Photos visible under a folder filter. On Android the folder id is a relative path we
-    /// already carry on each photo; on iOS it's an album whose membership we fetch once.
+    /// already carry on each photo; on iOS it's an album whose membership we fetch once. Ids
+    /// compare as the chips' do (<see cref="FolderFilter.IdComparer"/>), so a folder's months
+    /// count what its chip counts.
     /// </summary>
     public async Task<IReadOnlyList<PhotoAsset>> GetPhotosAsync(string? folderId)
     {
@@ -110,12 +112,12 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
         if (string.IsNullOrEmpty(folderId))
             return photos;
 
-        if (folderId == FavoritesFolderId)
+        if (FolderFilter.IdComparer.Equals(folderId, FavoritesFolderId))
             return photos.Where(p => p.IsFavorite).ToList();
 
         if (!_folderMembers.TryGetValue(folderId, out var members))
         {
-            var direct = photos.Where(p => p.FolderPath == folderId).Select(p => p.Id).ToHashSet();
+            var direct = photos.Where(p => FolderFilter.IdComparer.Equals(p.FolderPath, folderId)).Select(p => p.Id).ToHashSet();
             if (direct.Count == 0)
                 direct = (await library.GetAlbumMemberIdsAsync(folderId)).ToHashSet();
             _folderMembers[folderId] = members = direct;

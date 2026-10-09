@@ -486,7 +486,8 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     {
         // Aggregate folders by relative path in C# — MediaStore has no portable GROUP BY,
         // and bucket display names collide between e.g. Pictures/Travel and DCIM/Travel.
-        var byPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Spellings that differ only in case are one folder, counted under the first one met.
+        var byPath = new Dictionary<string, int>(FolderFilter.IdComparer);
 
         string[] projection = [MediaStore.Images.Media.InterfaceConsts.RelativePath];
 
