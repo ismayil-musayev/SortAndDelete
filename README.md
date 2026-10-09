@@ -16,6 +16,8 @@ one tap to **keep**, one tap to **delete** — month by month, with a safety net
   - *iOS*: the **Recently Deleted** album (restore there via the Photos app — Apple doesn't
     allow apps to do it programmatically).
   - *Android 10*: no system trash exists — the app warns and deletes permanently instead.
+    Known limitation: Android 10's MediaStore, asked to delete another app's photo after the
+    user's consent, drops the row but can keep the file, which the next media scan brings back.
 - **Undo** and a **Later** button for hard choices.
 
 ### Progress & resume
@@ -32,6 +34,12 @@ one tap to **keep**, one tap to **delete** — month by month, with a safety net
 ### Albums
 - **Move to albums** — send a photo to an existing folder/album ("Docs", "Travel", …) or create
   a new one. Android physically moves the file; iOS adds it to the album (how Photos works).
+  Where Android can't move a file in place, the app copies it, reads the copy back to check
+  every byte, and only then sends the original to the system trash (Android 11+), so a move is
+  recoverable for 30 days. Android 10 can't remove the original after a copy (see above), so
+  there moves stay in place: DCIM/Pictures for photos, DCIM/Movies for videos. Known
+  limitation: Android 10 refuses even those for items on an SD card ("Changing volume … not
+  allowed"), so they can't be moved there; the app says so and nothing changes.
 
 ## Duplicates
 
@@ -126,7 +134,7 @@ on iOS.
 ## Build, test, run
 
 ```bash
-dotnet test                                # 101 unit tests
+dotnet test                                # 210 unit tests
 dotnet build -f net10.0-android -t:Run     # Android (device/emulator attached)
 dotnet build -f net10.0-ios -t:Run         # iOS (needs a Mac)
 ```
@@ -140,14 +148,16 @@ workload). Android 10 (API 29)+ / iOS 15+.
 |---|---|---|
 | Delete → 30-day trash | `MediaStore.createTrashRequest` (API 30+) | `PHAssetChangeRequest.DeleteAssets` → Recently Deleted |
 | Restore after emptying bin | **In-app** (`createTrashRequest(…, false)`) | Photos app → Recently Deleted |
-| Move to album | File moves via `RELATIVE_PATH` update (per-item consent dialog) | Photo added to the album collection |
+| Move to album | In place via `RELATIVE_PATH` where MediaStore allows it (images: DCIM/Pictures; videos: DCIM/Movies, and Pictures from Android 11), one consent dialog. Download/Documents: copy. Any other folder: granted once through the system folder picker, then copy. A copy is written pending (MediaStore) or under a hidden name (folder grant), fsynced, read back and compared (length + SHA-256), and keeps the date, file time and ⭐; only then does the original go to the system trash (API 30+). Android 10 offers in-place moves only. Folders picked with *Browse* follow the same rules and must be on the device's own storage or SD card. The storage root and `Android/` (other apps' folders) are never targets | Photo added to the album collection |
 | Videos | MediaStore files table | `PHAssetMediaType.Video` |
-| Permissions | `READ_MEDIA_IMAGES`/`VIDEO` (13+), partial access (14+) | Read/write, limited access supported |
+| Permissions | `READ_MEDIA_IMAGES`/`VIDEO` (13+), partial access (14+), `ACCESS_MEDIA_LOCATION` so copy-style moves keep the location (never granted with partial access: a photo without one copies whole, otherwise the user is asked) | Read/write, limited access supported |
+| Backup | The two databases (decisions and the duplicate cache, keyed by MediaStore ids) are excluded from cloud backup and device transfer (`dataExtractionRules`, `fullBackupContent`); preferences still go | iCloud device backup |
 
 Gotcha worth knowing: `createTrashRequest`/`createWriteRequest` require **typed** media URIs
 (`images/media`, `video/media`) — files-table URIs are rejected. The Android service resolves
 each id's media kind (including trashed rows via `QUERY_ARG_MATCH_TRASHED`) before building
-consent requests.
+consent requests. And a query on an item's own uri finds it even in the system trash
+(`is_trashed=1`); whether the gallery still has it is a question for the collection.
 
 The in-app bin exists precisely so that *accidental* swipes are always recoverable in one tap,
 regardless of platform restrictions.

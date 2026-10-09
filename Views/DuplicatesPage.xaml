@@ -71,7 +71,9 @@
         </Border>
 
         <!-- ===== Groups ===== -->
-        <CollectionView Grid.Row="3" ItemsSource="{Binding Groups}" SelectionMode="None" Margin="12,8">
+        <!-- Hidden while scanning: the groups are empty then, so the empty view would sit under the progress panel. -->
+        <CollectionView Grid.Row="3" ItemsSource="{Binding Groups}" SelectionMode="None" Margin="12,8"
+                        IsVisible="{Binding IsScanning, Converter={StaticResource InvertedBool}}">
             <CollectionView.ItemTemplate>
                 <DataTemplate x:DataType="vm:DuplicateGroupCard">
                     <Border BackgroundColor="{StaticResource Surface}" Margin="0,0,0,10"

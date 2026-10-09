@@ -18,8 +18,23 @@ public interface IPhotoLibraryService
     /// </summary>
     bool CanRestoreFromSystemTrash { get; }
 
-    /// <summary>Requests read/write access to the photo library. Returns true when usable (full or partial access).</summary>
+    /// <summary>
+    /// Returns true when the library is usable (full or partial access), asking the user only
+    /// when it is not usable yet.
+    /// </summary>
     Task<bool> RequestAccessAsync();
+
+    /// <summary>
+    /// True when the user granted access to selected photos only (Android 14+), so the app sees
+    /// just those until the user adds more (<see cref="SelectMorePhotosAsync"/>).
+    /// </summary>
+    Task<bool> HasLimitedAccessAsync();
+
+    /// <summary>
+    /// Asks once more, on the user's request, so a limited selection can grow (the Android
+    /// photo picker). Returns true when the library is usable afterwards.
+    /// </summary>
+    Task<bool> SelectMorePhotosAsync();
 
     /// <summary>All photos and videos in the library, newest first. Excludes items already in the system trash.</summary>
     Task<IReadOnlyList<PhotoAsset>> GetAllPhotosAsync();
@@ -67,16 +82,33 @@ public interface IPhotoLibraryService
     /// </summary>
     Task<IReadOnlyCollection<string>> GetAlbumMemberIdsAsync(string folderId);
 
-    /// <summary>Existing albums/folders the user can move photos into.</summary>
+    /// <summary>Existing albums/folders in the library (the folder filter, and the source of move targets).</summary>
     Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync();
 
     /// <summary>
-    /// Moves the photo into the folder (Android) or adds it to the album (iOS).
-    /// Returns null when the move failed; otherwise the item's id after the move —
-    /// unchanged for in-place moves, a NEW id when the move had to copy the file
-    /// (browsed folders, other apps' Android/media sources).
+    /// The albums an item of <paramref name="kind"/> can be moved into. Android leaves out the
+    /// folders no app may write to (and on Android 10 those a move could only copy into), and
+    /// flags those it can reach only after the user grants access to the folder
+    /// (<see cref="RequestFolderAccessAsync"/>).
     /// </summary>
-    Task<string?> MoveToAlbumAsync(string photoId, AlbumInfo album);
+    Task<IReadOnlyList<MoveTarget>> GetMoveTargetsAsync(MediaKind kind);
+
+    /// <summary>
+    /// Asks the user for lasting access to the album's folder through the system folder picker,
+    /// opened on that folder (Android). Always granted on iOS, which never needs it.
+    /// </summary>
+    Task<FolderAccessResult> RequestFolderAccessAsync(AlbumInfo album);
+
+    /// <summary>
+    /// Moves the photo into the folder (Android) or adds it to the album (iOS). When moved, the
+    /// result carries the item's id afterwards — unchanged for in-place moves, a NEW id when the
+    /// move had to copy the file (folders MediaStore won't move into, other apps' Android/media
+    /// sources). A copy is checked before the original is removed (into the system trash on
+    /// Android 11+). Backing out of a system dialog or a question cancels; a failure says why.
+    /// <paramref name="feedback"/> gets the progress of a large copy, and is asked when something
+    /// can't be kept (a copy's date) before anything is removed.
+    /// </summary>
+    Task<MoveResult> MoveToAlbumAsync(string photoId, AlbumInfo album, MoveFeedback? feedback = null);
 
     /// <summary>True when items can be handed to an external viewer app (Android ACTION_VIEW).</summary>
     bool SupportsOpenExternally { get; }
@@ -92,12 +124,18 @@ public interface IPhotoLibraryService
     bool SupportsFolderBrowsing { get; }
 
     /// <summary>
-    /// Opens the system folder browser so the user can pick any folder on the device
-    /// (Android). The pick is persisted and the folder appears in later album lists.
-    /// Returns null when cancelled or unsupported (iOS).
+    /// Opens the system folder browser so the user can pick a folder on the device's own storage
+    /// or SD card (Android) to move an item of <paramref name="kind"/> into. The pick is persisted
+    /// and the folder appears in later album lists. A folder moves can't go into (another
+    /// provider's, the top of the storage, an app's, and on Android 10 one that would need a
+    /// copy) comes back as a problem to show instead. <see cref="FolderPick.None"/> when cancelled
+    /// or unsupported (iOS).
     /// </summary>
-    Task<AlbumInfo?> PickExternalFolderAsync();
+    Task<FolderPick> PickExternalFolderAsync(MediaKind kind);
 
-    /// <summary>Creates a new album/folder and returns it, or null on failure.</summary>
-    Task<AlbumInfo?> CreateAlbumAsync(string name);
+    /// <summary>
+    /// Creates a new album/folder for an item of <paramref name="kind"/> and returns it, or null
+    /// on failure. On Android it lands where moving that item into it needs no folder access.
+    /// </summary>
+    Task<AlbumInfo?> CreateAlbumAsync(string name, MediaKind kind);
 }

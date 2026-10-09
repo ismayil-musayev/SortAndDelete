@@ -24,3 +24,15 @@ public sealed class PartialGalleryPermission : Permissions.BasePlatformPermissio
     public override (string androidPermission, bool isRuntime)[] RequiredPermissions =>
         [("android.permission.READ_MEDIA_VISUAL_USER_SELECTED", true)];
 }
+
+/// <summary>
+/// ACCESS_MEDIA_LOCATION: without it Android blanks the location in every photo or video the
+/// app reads but didn't create, so a move that copies the file would lose where it was taken.
+/// Kept apart from <see cref="GalleryPermission"/>: missing it must not make the library look
+/// inaccessible.
+/// </summary>
+public sealed class MediaLocationPermission : Permissions.BasePlatformPermission
+{
+    public override (string androidPermission, bool isRuntime)[] RequiredPermissions =>
+        [(global::Android.Manifest.Permission.AccessMediaLocation, true)];
+}

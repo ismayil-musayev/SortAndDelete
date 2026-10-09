@@ -24,7 +24,7 @@
 
         <CollectionView Grid.Row="2" x:Name="AlbumList" SelectionMode="None">
             <CollectionView.ItemTemplate>
-                <DataTemplate x:DataType="models:AlbumInfo">
+                <DataTemplate x:DataType="models:MoveTarget">
                     <Grid Padding="0,4">
                         <Border BackgroundColor="{StaticResource Surface}"
                                 StrokeThickness="0" StrokeShape="RoundRectangle 14"
@@ -35,14 +35,17 @@
                             <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12">
                                 <Label Text="📁" FontSize="18" VerticalOptions="Center" />
                                 <VerticalStackLayout Grid.Column="1" Spacing="1" VerticalOptions="Center">
-                                    <Label Text="{Binding Name}" FontSize="15"
+                                    <Label Text="{Binding Album.Name}" FontSize="15"
                                            TextColor="{StaticResource TextPrimary}" />
-                                    <Label Text="{Binding Subtitle}" FontSize="11"
+                                    <Label Text="{Binding Album.Subtitle}" FontSize="11"
                                            TextColor="{StaticResource TextSecondary}"
                                            LineBreakMode="MiddleTruncation"
-                                           IsVisible="{Binding Subtitle, Converter={StaticResource IsNotNullOrEmpty}}" />
+                                           IsVisible="{Binding Album.Subtitle, Converter={StaticResource IsNotNullOrEmpty}}" />
+                                    <Label Text="Android asks once for access to this folder" FontSize="11"
+                                           TextColor="{StaticResource WarnAmber}"
+                                           IsVisible="{Binding NeedsFolderAccess}" />
                                 </VerticalStackLayout>
-                                <Label Grid.Column="2" Text="{Binding CountText}" FontSize="12"
+                                <Label Grid.Column="2" Text="{Binding Album.CountText}" FontSize="12"
                                        TextColor="{StaticResource TextSecondary}" VerticalOptions="Center" />
                             </Grid>
                         </Border>

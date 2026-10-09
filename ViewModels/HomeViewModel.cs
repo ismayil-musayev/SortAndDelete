@@ -70,6 +70,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
 
     [ObservableProperty] private bool isLoading;
     [ObservableProperty] private bool hasAccess = true;
+    [ObservableProperty] private bool isLimitedAccess;
     [ObservableProperty] private string totalPhotosText = "";
     [ObservableProperty] private string reviewedText = "";
     [ObservableProperty] private string freedText = "";
@@ -98,6 +99,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         try
         {
             HasAccess = await gallery.Library.RequestAccessAsync();
+            IsLimitedAccess = HasAccess && await gallery.Library.HasLimitedAccessAsync();
             if (!HasAccess)
             {
                 Months.Clear();
@@ -306,6 +308,18 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
 
     [RelayCommand]
     private Task OpenDuplicates() => Shell.Current.GoToAsync(nameof(DuplicatesPage));
+
+    /// <summary>
+    /// With selected photos only, the app never asks again by itself (that reopened the picker on
+    /// every visit to Home), so adding photos is the user's call, one picker per tap.
+    /// </summary>
+    [RelayCommand]
+    private async Task SelectMorePhotos()
+    {
+        HasAccess = await gallery.Library.SelectMorePhotosAsync();
+        gallery.Invalidate();
+        await LoadAsync(refresh: true);
+    }
 
     [RelayCommand]
     private async Task GrantAccess()

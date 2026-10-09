@@ -87,6 +87,21 @@
                             </Border>
                         </FlexLayout>
 
+                        <!-- Android 14+ "selected photos only": adding more is the user's call -->
+                        <Border IsVisible="{Binding IsLimitedAccess}"
+                                BackgroundColor="{StaticResource Surface}"
+                                StrokeThickness="0" StrokeShape="RoundRectangle 14" Padding="14,10">
+                            <Border.GestureRecognizers>
+                                <TapGestureRecognizer Command="{Binding SelectMorePhotosCommand}" />
+                            </Border.GestureRecognizers>
+                            <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                                <Label Text="Showing only the photos you selected" FontSize="13"
+                                       TextColor="{StaticResource TextSecondary}" VerticalOptions="Center" />
+                                <Label Grid.Column="1" Text="Select more" FontSize="13" FontAttributes="Bold"
+                                       TextColor="{StaticResource Accent}" VerticalOptions="Center" />
+                            </Grid>
+                        </Border>
+
                         <!-- Continue where you left off -->
                         <Border IsVisible="{Binding ContinueMonth, Converter={StaticResource IsNotNull}}"
                                 BackgroundColor="{StaticResource Accent}"

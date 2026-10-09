@@ -91,6 +91,8 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
             return;
 
         _loadInProgress = true;
+        ScanProgress = 0; // a rescan would otherwise open on the last scan's full bar and "Grouping"
+        ScanStatus = "";
         IsScanning = true;
         try
         {

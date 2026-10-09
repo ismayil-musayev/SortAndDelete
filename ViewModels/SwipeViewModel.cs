@@ -13,9 +13,21 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     private const int CardPixelSize = 2048;
 
     private List<PhotoAsset> _queue = [];
-    private readonly Stack<(PhotoAsset Photo, SwipeDecision Decision)> _history = new();
+    private readonly Stack<Step> _history = new();
     private int _total;
     private bool _initialized;
+
+    /// <summary>
+    /// One decision, as Undo needs it. A copy-style move replaced the photo with a new item, the
+    /// copy (<see cref="CopyId"/>, null when Android didn't say which): Undo brings the copy back,
+    /// never the original's id, which is gone.
+    /// </summary>
+    private sealed record Step(PhotoAsset Photo, bool Copied = false, string? CopyId = null, string? AlbumName = null);
+
+    // A move owns the deck until it ends: closing the album picker re-syncs the deck (OnAppearing),
+    // and a re-dealt deck must not change which photo the move is about. That re-sync waits.
+    private bool _moving;
+    private bool _resyncPending;
 
     public DeckMode Mode { get; private set; } = DeckMode.Month;
 
@@ -39,6 +51,9 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     [ObservableProperty] private string binBadgeText = "Bin";
     [ObservableProperty] private string doneTitle = "All done!";
     [ObservableProperty] private string doneSubtitle = "";
+    [ObservableProperty] private bool isCopying;
+    [ObservableProperty] private double copyProgress;
+    [ObservableProperty] private string copyText = "";
 
     public PhotoAsset? CurrentPhoto => _queue.Count > 0 ? _queue[0] : null;
 
@@ -62,7 +77,10 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     {
         if (_initialized)
         {
-            await ResyncAsync();
+            if (_moving)
+                _resyncPending = true;
+            else
+                await ResyncAsync();
             return;
         }
 
@@ -176,9 +194,9 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
         CanUndo = _history.Count > 0;
     }
 
-    public Task KeepAsync() => DecideAsync(SwipeDecision.Keep, album: null);
+    public Task KeepAsync() => CurrentPhoto is { } photo ? DecideAsync(photo, SwipeDecision.Keep, album: null) : Task.CompletedTask;
 
-    public Task TrashAsync() => DecideAsync(SwipeDecision.Trash, album: null);
+    public Task TrashAsync() => CurrentPhoto is { } photo ? DecideAsync(photo, SwipeDecision.Trash, album: null) : Task.CompletedTask;
 
     /// <summary>"Not sure yet" — pushes the photo to the end of the queue without a decision.</summary>
     public void Later()
@@ -195,30 +213,85 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     public async Task<bool> MoveToAlbumAsync()
     {
         var photo = CurrentPhoto;
-        if (photo is null)
+        if (photo is null || _moving)
             return false;
 
-        var album = await albumPicker.PickAsync();
-        if (album is null)
-            return false;
+        _moving = true;
+        try
+        {
+            return await MoveAsync(photo);
+        }
+        finally
+        {
+            _moving = false;
+            IsCopying = false;
+            if (_resyncPending)
+            {
+                _resyncPending = false;
+                await ResyncAsync();
+            }
+        }
+    }
 
-        var idAfterMove = await gallery.Library.MoveToAlbumAsync(photo.Id, album);
-        if (idAfterMove is null)
+    /// <summary>Moves <paramref name="photo"/>, the card the user pressed the button on, whatever the deck shows meanwhile.</summary>
+    private async Task<bool> MoveAsync(PhotoAsset photo)
+    {
+        AlbumInfo? album;
+        MoveResult result;
+        try
+        {
+            album = await albumPicker.PickAsync(photo.Kind);
+            if (album is null)
+                return false;
+
+            CopyText = $"Copying to {album.Name}…";
+            CopyProgress = 0;
+            var feedback = new MoveFeedback
+            {
+                // Large items only. The copy is checked before the original is touched.
+                Progress = new Progress<double>(value =>
+                {
+                    if (!_moving)
+                        return;
+                    CopyProgress = value;
+                    IsCopying = value < 1;
+                }),
+                ConfirmAsync = (title, message, accept) =>
+                    Shell.Current.DisplayAlertAsync(title, message, accept, "Cancel"),
+            };
+            result = await gallery.Library.MoveToAlbumAsync(photo.Id, album, feedback);
+        }
+        catch (Exception)
+        {
+            // The move reports its own failures; this is the unforeseen, kept from crashing the app.
+            await Shell.Current.DisplayAlertAsync("Move failed",
+                "Something went wrong while moving it. Check the album before trying again.", "OK");
+            return false;
+        }
+        finally
+        {
+            IsCopying = false;
+        }
+
+        if (result.Outcome == MoveOutcome.Cancelled)
+            return false; // the user said no in a system dialog — nothing to explain
+
+        if (result.Outcome != MoveOutcome.Moved)
         {
             await Shell.Current.DisplayAlertAsync("Move failed",
-                "This photo could not be moved. It may be read-only or already gone.", "OK");
+                result.Problem ?? "This photo could not be moved.", "OK");
             return false;
         }
 
-        await DecideAsync(SwipeDecision.Moved, album);
-
-        // Copy-style moves (WhatsApp sources, browsed folders) give the file a new
-        // identity — mark it reviewed too so it never comes back into a deck.
-        if (idAfterMove != photo.Id)
+        // Copy-style moves (WhatsApp sources, Download/Documents, folders reached through a
+        // folder grant) give the file a new identity — mark it reviewed too so it never comes
+        // back into a deck.
+        bool copied = result.PhotoId != photo.Id;
+        if (copied && result.PhotoId is { } copyId)
         {
             await gallery.Store.UpsertAsync(new ReviewRecord
             {
-                PhotoId = idAfterMove,
+                PhotoId = copyId,
                 MonthKey = photo.MonthKey,
                 Decision = SwipeDecision.Moved,
                 DecidedAt = DateTime.UtcNow,
@@ -228,6 +301,19 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
         }
 
         gallery.Invalidate(); // folder contents changed; copy-style moves even change ids
+
+        if (result.OriginalKept)
+        {
+            // Android kept the original too: it stays in the deck, to delete or keep.
+            await Shell.Current.DisplayAlertAsync("Now in both places", result.Note ?? "", "OK");
+            return false;
+        }
+
+        await DecideAsync(photo, SwipeDecision.Moved, album,
+            new Step(photo, copied, copied ? result.PhotoId : null, album.Name));
+
+        if (result.Note is { } note)
+            await Shell.Current.DisplayAlertAsync("Moved", note, "OK");
         return true;
     }
 
@@ -236,19 +322,49 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
         if (_history.Count == 0)
             return;
 
-        var (photo, _) = _history.Pop();
-        await gallery.Store.RemoveAsync(photo.Id);
+        var step = _history.Pop();
+        var photo = step.Photo;
+        if (step.Copied)
+        {
+            // The original is gone (to the system trash, or deleted); its copy is the photo now.
+            var copy = step.CopyId is { } copyId ? await FindAsync(copyId) : null;
+            if (copy is null)
+            {
+                CanUndo = _history.Count > 0;
+                await Shell.Current.DisplayAlertAsync("Can't undo the move",
+                    $"It's in {step.AlbumName ?? "the album"} now as a copy, and Sort & Delete can't " +
+                    "see that copy to bring it back here.", "OK");
+                return;
+            }
+
+            await gallery.Store.RemoveAsync(photo.Id);
+            await gallery.Store.RemoveAsync(copy.Id);
+            photo = copy;
+        }
+        else
+        {
+            await gallery.Store.RemoveAsync(photo.Id);
+        }
+
+        _queue.RemoveAll(p => p.Id == photo.Id);
         _queue.Insert(0, photo);
         await RefreshBinBadgeAsync();
         RefreshCards();
     }
 
-    private async Task DecideAsync(SwipeDecision decision, AlbumInfo? album)
+    /// <summary>The library's item with this id, or null when the app can't see it.</summary>
+    private async Task<PhotoAsset?> FindAsync(string photoId)
     {
-        var photo = CurrentPhoto;
-        if (photo is null)
-            return;
+        await gallery.GetPhotosAsync(); // reloads after a move invalidated it
+        return gallery.Find(photoId);
+    }
 
+    /// <summary>
+    /// Records the decision about <paramref name="photo"/> and takes it off the deck, by id: the
+    /// deck can have been re-dealt since the user acted on it.
+    /// </summary>
+    private async Task DecideAsync(PhotoAsset photo, SwipeDecision decision, AlbumInfo? album, Step? step = null)
+    {
         // The bin shows how much space you'll free — on iOS the size isn't known up front.
         long size = photo.SizeBytes;
         if (size == 0 && decision == SwipeDecision.Trash)
@@ -264,8 +380,8 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
             TargetAlbum = album?.Name,
         });
 
-        _history.Push((photo, decision));
-        _queue.RemoveAt(0);
+        _history.Push(step ?? new Step(photo));
+        _queue.RemoveAll(p => p.Id == photo.Id);
 
         if (decision == SwipeDecision.Trash)
             await RefreshBinBadgeAsync();

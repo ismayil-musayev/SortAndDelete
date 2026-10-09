@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backup and device transfer on Android 10 and 11 (android:fullBackupContent). Android 12+
+     reads data_extraction_rules.xml instead, which says why: keep the two in step.
+     The databases live in FileSystem.AppDataDirectory, the "file" domain. -->
+<full-backup-content>
+    <exclude domain="file" path="sortanddelete.db3" />
+    <exclude domain="file" path="sortanddelete.db3-journal" />
+    <exclude domain="file" path="sortanddelete.db3-wal" />
+    <exclude domain="file" path="sortanddelete.db3-shm" />
+    <exclude domain="file" path="duplicates.db3" />
+    <exclude domain="file" path="duplicates.db3-journal" />
+    <exclude domain="file" path="duplicates.db3-wal" />
+    <exclude domain="file" path="duplicates.db3-shm" />
+</full-backup-content>

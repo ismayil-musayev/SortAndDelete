@@ -26,6 +26,11 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
         return status is PHAuthorizationStatus.Authorized or PHAuthorizationStatus.Limited;
     }
 
+    /// <summary>iOS manages a limited selection in its own UI; the app doesn't offer it here.</summary>
+    public Task<bool> HasLimitedAccessAsync() => Task.FromResult(false);
+
+    public Task<bool> SelectMorePhotosAsync() => RequestAccessAsync();
+
     public Task<IReadOnlyList<PhotoAsset>> GetAllPhotosAsync() => Task.Run<IReadOnlyList<PhotoAsset>>(() =>
     {
         var list = new List<PhotoAsset>();
@@ -341,15 +346,22 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
         return list.OrderBy(a => a.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
     });
 
-    public async Task<string?> MoveToAlbumAsync(string photoId, AlbumInfo album)
+    /// <summary>Any album takes any asset, with nothing to ask first.</summary>
+    public async Task<IReadOnlyList<MoveTarget>> GetMoveTargetsAsync(MediaKind kind) =>
+        (await GetAlbumsAsync()).Select(album => new MoveTarget(album, NeedsFolderAccess: false)).ToList();
+
+    public Task<FolderAccessResult> RequestFolderAccessAsync(AlbumInfo album) =>
+        Task.FromResult(FolderAccessResult.Granted);
+
+    public async Task<MoveResult> MoveToAlbumAsync(string photoId, AlbumInfo album, MoveFeedback? feedback = null)
     {
         var asset = FetchAsset(photoId);
         if (asset is null)
-            return null;
+            return MoveResult.Failed("This photo is no longer in your library.");
 
         var collections = PHAssetCollection.FetchAssetCollections([album.Id], null);
         if (collections.Count == 0 || collections.ObjectAt(0) is not PHAssetCollection collection)
-            return null;
+            return MoveResult.Failed($"The album {album.Name} no longer exists.");
 
         // iOS albums are references, not folders — the photo is added to the album
         // (it stays in the main library too; that's how Photos works). Same asset, same id.
@@ -361,7 +373,9 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
                 request?.AddAssets(new PHObject[] { asset });
             },
             (success, _) => tcs.TrySetResult(success));
-        return await tcs.Task ? photoId : null;
+        return await tcs.Task
+            ? MoveResult.Moved(photoId)
+            : MoveResult.Failed($"Photos didn't add it to {album.Name}.");
     }
 
     /// <summary>iOS offers no per-asset deep link into the Photos app.</summary>
@@ -372,9 +386,9 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
     /// <summary>iOS photos live in the library, not folders — the album list already covers everything.</summary>
     public bool SupportsFolderBrowsing => false;
 
-    public Task<AlbumInfo?> PickExternalFolderAsync() => Task.FromResult<AlbumInfo?>(null);
+    public Task<FolderPick> PickExternalFolderAsync(MediaKind kind) => Task.FromResult(FolderPick.None);
 
-    public async Task<AlbumInfo?> CreateAlbumAsync(string name)
+    public async Task<AlbumInfo?> CreateAlbumAsync(string name, MediaKind kind)
     {
         string? newId = null;
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

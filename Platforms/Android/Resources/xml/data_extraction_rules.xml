@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backup and device transfer on Android 12+ (android:dataExtractionRules). Android 10 and 11
+     read backup_rules.xml instead: keep the two in step.
+
+     The review decisions and the duplicate-scan cache are keyed by MediaStore ids, which name
+     other photos on another phone, or once the phone's media library is rebuilt. Restored there,
+     decisions would send unrelated photos to the bin and hide others from the decks, and the
+     cache would pair the wrong photos as duplicates. Android can't tell such a restore from a
+     reinstall on the same phone, so neither database goes along, and review progress starts over
+     after a reinstall too. The preferences still go: the last month opened, and browsed folders,
+     which come back without their access and so stay hidden until chosen again. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="sortanddelete.db3" />
+        <exclude domain="file" path="sortanddelete.db3-journal" />
+        <exclude domain="file" path="sortanddelete.db3-wal" />
+        <exclude domain="file" path="sortanddelete.db3-shm" />
+        <exclude domain="file" path="duplicates.db3" />
+        <exclude domain="file" path="duplicates.db3-journal" />
+        <exclude domain="file" path="duplicates.db3-wal" />
+        <exclude domain="file" path="duplicates.db3-shm" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="sortanddelete.db3" />
+        <exclude domain="file" path="sortanddelete.db3-journal" />
+        <exclude domain="file" path="sortanddelete.db3-wal" />
+        <exclude domain="file" path="sortanddelete.db3-shm" />
+        <exclude domain="file" path="duplicates.db3" />
+        <exclude domain="file" path="duplicates.db3-journal" />
+        <exclude domain="file" path="duplicates.db3-wal" />
+        <exclude domain="file" path="duplicates.db3-shm" />
+    </device-transfer>
+</data-extraction-rules>

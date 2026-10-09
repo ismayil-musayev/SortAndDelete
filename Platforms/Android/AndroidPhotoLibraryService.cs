@@ -2,7 +2,10 @@ using Android.App;
 using Android.Content;
 using Android.OS;
 using Android.Provider;
+using Microsoft.Win32.SafeHandles;
+using SortAndDelete.Logic;
 using SortAndDelete.Models;
+using System.Security.Cryptography;
 using AndroidUri = Android.Net.Uri;
 using Application = Android.App.Application;
 
@@ -17,6 +20,8 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     private const string ColMediaType = "media_type";
     private const string ColDuration = "duration";
     private const string ColIsFavorite = "is_favorite"; // API 30+
+    private const string ColVolumeName = "volume_name";
+    private const string ColIsPending = "is_pending";
 
     private static ContentResolver Resolver =>
         Application.Context.ContentResolver ?? throw new InvalidOperationException("No ContentResolver.");
@@ -40,17 +45,36 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
 
     public async Task<bool> RequestAccessAsync()
     {
-        var status = await Permissions.RequestAsync<GalleryPermission>();
-        if (status == PermissionStatus.Granted)
+        // Ask only when there is no access yet. With the Android 14+ "selected photos" subset,
+        // READ_MEDIA_IMAGES stays denied, and asking again doesn't show a dialog: it reopens the
+        // system photo picker. Home asks on every appearance, so the picker kept coming back.
+        if (await Permissions.CheckStatusAsync<GalleryPermission>() == PermissionStatus.Granted ||
+            await HasSelectedPhotosAccessAsync())
+            return true;
+
+        if (await Permissions.RequestAsync<GalleryPermission>() == PermissionStatus.Granted)
             return true;
 
         // Android 14+: the user may have granted access to selected photos only.
-        if (OperatingSystem.IsAndroidVersionAtLeast(34) &&
-            await Permissions.CheckStatusAsync<PartialGalleryPermission>() == PermissionStatus.Granted)
-            return true;
-
-        return false;
+        return await HasSelectedPhotosAccessAsync();
     }
+
+    public async Task<bool> HasLimitedAccessAsync() =>
+        await Permissions.CheckStatusAsync<GalleryPermission>() != PermissionStatus.Granted &&
+        await HasSelectedPhotosAccessAsync();
+
+    public async Task<bool> SelectMorePhotosAsync()
+    {
+        // With selected photos only, asking again opens the system photo picker on the current
+        // selection (or the user allows all) — exactly once, because the user asked for it.
+        if (await Permissions.RequestAsync<GalleryPermission>() == PermissionStatus.Granted)
+            return true;
+        return await HasSelectedPhotosAccessAsync();
+    }
+
+    private static async Task<bool> HasSelectedPhotosAccessAsync() =>
+        OperatingSystem.IsAndroidVersionAtLeast(34) &&
+        await Permissions.CheckStatusAsync<PartialGalleryPermission>() == PermissionStatus.Granted;
 
     public Task<IReadOnlyList<PhotoAsset>> GetAllPhotosAsync() => Task.Run<IReadOnlyList<PhotoAsset>>(() =>
     {
@@ -391,38 +415,71 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         // consent dialog Android requires for photos this app doesn't own.
         foreach (var uri in uris)
         {
-            if (!await DeleteWithConsentAsync(uri))
+            if (await DeleteWithConsentAsync(uri) != DeleteResult.Deleted)
                 return false;
         }
         return true;
     }
 
-    private static async Task<bool> DeleteWithConsentAsync(AndroidUri uri)
+    private enum DeleteResult
+    {
+        /// <summary>The item is gone (also when something else deleted it first).</summary>
+        Deleted,
+
+        /// <summary>The user said no in the consent dialog.</summary>
+        Declined,
+
+        /// <summary>Android refused, or the delete did nothing.</summary>
+        Refused,
+    }
+
+    /// <summary>
+    /// Android 10: deletes an item, behind the consent dialog Android requires for items this app
+    /// doesn't own. Deleted only once a query no longer finds the item: a delete can report
+    /// nothing done, or succeed without the item going.
+    /// </summary>
+    private static async Task<DeleteResult> DeleteWithConsentAsync(AndroidUri uri)
     {
         try
         {
-            Resolver.Delete(uri, null, null);
-            return true;
+            return await Task.Run(() => DeleteAndCheck(uri)) ? DeleteResult.Deleted : DeleteResult.Refused;
         }
         catch (Java.Lang.SecurityException ex)
         {
             if (ex is not RecoverableSecurityException recoverable)
-                return false;
+                return DeleteResult.Refused;
 
             var intentSender = recoverable.UserAction.ActionIntent.IntentSender;
             if (!await IntentSenderLauncher.LaunchAsync(intentSender))
-                return false;
+                return DeleteResult.Declined;
 
             try
             {
-                Resolver.Delete(uri, null, null);
-                return true;
+                return await Task.Run(() => DeleteAndCheck(uri)) ? DeleteResult.Deleted : DeleteResult.Refused;
             }
             catch
             {
-                return false;
+                return DeleteResult.Refused;
             }
         }
+        catch
+        {
+            return DeleteResult.Refused;
+        }
+    }
+
+    /// <summary>Deletes, then asks whether the item is gone. Throws what the delete throws.</summary>
+    private static bool DeleteAndCheck(AndroidUri uri)
+    {
+        Resolver.Delete(uri, null, null);
+        return !Exists(uri);
+    }
+
+    /// <summary>Whether a query still finds the item (trashed and pending items aren't found).</summary>
+    private static bool Exists(AndroidUri uri)
+    {
+        using var cursor = Resolver.Query(uri, [MediaStore.Images.Media.InterfaceConsts.Id], null, null, null);
+        return cursor is not null && cursor.MoveToFirst();
     }
 
     public Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync() => Task.Run<IReadOnlyList<AlbumInfo>>(() =>
@@ -514,24 +571,219 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         }
     }
 
-    public async Task<string?> MoveToAlbumAsync(string photoId, AlbumInfo album)
-    {
-        // Folders picked via the system browser: MediaStore can't relocate media there,
-        // so we copy the bytes and delete the original instead.
-        if (album.Id.StartsWith(SafPrefix, StringComparison.Ordinal))
-            return await MoveViaSafAsync(photoId, album.Id[SafPrefix.Length..]);
+    /// <summary>MediaStore takes videos under Pictures/ from Android 11 on.</summary>
+    private static bool VideosAllowedInPictures => OperatingSystem.IsAndroidVersionAtLeast(30);
 
-        var relativePath = string.IsNullOrEmpty(album.Id) ? $"Pictures/{album.Name}/" : album.Id;
+    /// <summary>
+    /// Whether Android removes an original another app saved once the user agrees: from Android 11
+    /// on (system trash, delete request). Android 10's MediaStore drops the original's row but
+    /// keeps its file, and the next media scan brings it back, so a move that copies would leave
+    /// the photo in both places. There every move is in place, or not offered.
+    /// </summary>
+    private static bool CanRemoveOriginals => OperatingSystem.IsAndroidVersionAtLeast(30);
+
+    public async Task<IReadOnlyList<MoveTarget>> GetMoveTargetsAsync(MediaKind kind)
+    {
+        var albums = await GetAlbumsAsync();
+        var grants = await Task.Run(PersistedFolderGrants);
+        var galleryFolders = albums.Where(a => !IsBrowsedFolder(a)).Select(a => a.Id).ToList();
+
+        var targets = new List<MoveTarget>();
+        foreach (var album in albums)
+        {
+            if (IsBrowsedFolder(album))
+            {
+                if (IsOfferedBrowsedFolder(album, grants, galleryFolders) &&
+                    (CanRemoveOriginals || MoveRouting.RouteFor(MoveRouting.RelativePathOfGrant(TreeDocumentIdOf(album)!),
+                        kind, VideosAllowedInPictures) == MoveRoute.InPlace))
+                    targets.Add(new MoveTarget(album, NeedsFolderAccess: false));
+                continue;
+            }
+
+            var route = MoveRouting.RouteFor(album.Id, kind, VideosAllowedInPictures);
+            if (!CanRemoveOriginals && route != MoveRoute.InPlace)
+                continue; // Android 10: it would be a copy, and the original would stay
+
+            switch (route)
+            {
+                case MoveRoute.NotPossible:
+                    continue; // no app may write there, so it is never offered
+                case MoveRoute.FolderAccess:
+                    targets.Add(new MoveTarget(album, NeedsFolderAccess: FindFolderGrant(grants, album.Id) is null));
+                    break;
+                default:
+                    targets.Add(new MoveTarget(album, NeedsFolderAccess: false));
+                    break;
+            }
+        }
+        return targets;
+    }
+
+    /// <summary>
+    /// Whether a folder picked with the system folder browser is still offered: one this version
+    /// would accept now (see <see cref="PickExternalFolderAsync"/>; older versions kept others),
+    /// still granted (the grant can be withdrawn, and a restored backup never carries it), and
+    /// not already listed. A browsed internal-storage folder that is also a gallery folder is
+    /// listed once, as the gallery folder; gallery folders don't say which volume they are on,
+    /// so a browsed SD card folder always stays.
+    /// </summary>
+    private static bool IsOfferedBrowsedFolder(AlbumInfo album,
+        List<(AndroidUri Tree, string DocumentId)> grants, List<string> galleryFolders)
+    {
+        if (TreeDocumentIdOf(album) is not { } browsed || BrowsedFolderProblem(browsed) is not null)
+            return false;
+
+        if (!grants.Any(grant => grant.DocumentId == browsed))
+            return false;
+
+        return !browsed.StartsWith(PrimaryVolume, StringComparison.Ordinal) ||
+               !galleryFolders.Any(folder => MoveRouting.IsGrantFor(browsed, folder));
+    }
+
+    /// <summary>
+    /// Why Sort &amp; Delete won't move into a browsed internal-storage or SD card folder, or null
+    /// when it will. The same folders are never offered from the gallery either.
+    /// </summary>
+    private static string? BrowsedFolderProblem(string treeDocumentId)
+    {
+        var relativePath = MoveRouting.RelativePathOfGrant(treeDocumentId);
+        if (MoveRouting.IsAppFolder(relativePath))
+            return AppFolderRefused;
+        return relativePath.Length == 0 ? StorageTopRefused : null;
+    }
+
+    public async Task<FolderAccessResult> RequestFolderAccessAsync(AlbumInfo album)
+    {
+        var intent = new Intent(Intent.ActionOpenDocumentTree);
+        intent.AddFlags(ActivityFlags.GrantReadUriPermission
+                        | ActivityFlags.GrantWriteUriPermission
+                        | ActivityFlags.GrantPersistableUriPermission);
+
+        // Open the picker on the album's own folder, so granting it takes two taps. Albums are
+        // merged across volumes, so internal storage is the best guess; the user can browse on.
+        var folder = DocumentsContract.BuildDocumentUri(ExternalStorageAuthority, PrimaryVolume + album.Id.Trim('/'));
+        intent.PutExtra(DocumentsContract.ExtraInitialUri, folder);
+
+        var result = await ActivityLauncher.LaunchForResultAsync(intent);
+        if (result?.Data is not AndroidUri treeUri)
+            return FolderAccessResult.Cancelled;
+
+        // Some other folder: not persisted, so its one-off grant lapses with the app.
+        var treeDocumentId = treeUri.Authority == ExternalStorageAuthority
+            ? DocumentsContract.GetTreeDocumentId(treeUri)
+            : null;
+        if (treeDocumentId is null || !MoveRouting.GrantCovers(treeDocumentId, album.Id))
+            return FolderAccessResult.OtherFolder;
+
+        try
+        {
+            Resolver.TakePersistableUriPermission(treeUri,
+                ActivityFlags.GrantReadUriPermission | ActivityFlags.GrantWriteUriPermission);
+        }
+        catch (Java.Lang.Exception)
+        {
+            // Moves look for persisted grants only, so the move will say access is missing.
+        }
+        return FolderAccessResult.Granted;
+    }
+
+    public async Task<MoveResult> MoveToAlbumAsync(string photoId, AlbumInfo album, MoveFeedback? feedback = null)
+    {
+        var source = await Task.Run(() => IsInGallery(photoId) ? QuerySourceInfo(photoId) : null);
+        if (source is null)
+            return MoveResult.Failed("This photo is no longer in your gallery.");
+
+        var job = new MoveJob(photoId, source, await KindOfAsync(photoId), album, feedback);
+
+        if (IsBrowsedFolder(album))
+            return await MoveIntoBrowsedFolderAsync(job);
+
+        // "pictures/x/" is the same folder as "Pictures/x/", but Android 10 and 11 only move into
+        // the standard spelling.
+        var relativePath = MoveRouting.Canonical(string.IsNullOrEmpty(album.Id) ? $"Pictures/{album.Name}/" : album.Id);
+
+        // Already in that folder: nothing to move, and no dialog to show for it.
+        if (MoveRouting.IsSameFolder(source.RelativePath, relativePath))
+            return MoveResult.Moved(photoId);
+
+        // MediaStore moves a file in place only into the top-level folders its collection
+        // allows; anywhere else the update throws, and so would a copy into that collection.
+        switch (MoveRouting.RouteFor(relativePath, job.Kind, VideosAllowedInPictures))
+        {
+            case MoveRoute.NotPossible:
+                return MoveResult.Failed(MoveRouting.IsAppFolder(relativePath)
+                    ? AppFolderRefused
+                    : $"Android doesn't let apps put files in {(album.Name.Length > 0 ? album.Name : "that folder")}.");
+
+            case MoveRoute.Copy:
+                // Download/ and Documents/ take new files of any type through the files table.
+                return await MoveViaCopyAsync(job, relativePath, FilesUri);
+
+            case MoveRoute.FolderAccess:
+                var grant = FindFolderGrant(await Task.Run(PersistedFolderGrants), relativePath);
+                return grant is { } granted
+                    ? await MoveViaSafAsync(job, granted.Tree, granted.FolderDocumentId)
+                    : MoveResult.Failed($"Sort & Delete has no access to {album.Name}. " +
+                                        "Choose it again and allow access to the folder.");
+        }
 
         // Files inside another app's Android/media directory (WhatsApp, Telegram, …)
         // can't be relocated by MediaStore at all — copy + delete instead.
-        var source = await Task.Run(() => QuerySourceInfo(photoId));
-        if (source is null)
-            return null;
-        if (source.RelativePath.StartsWith("Android/", StringComparison.OrdinalIgnoreCase))
-            return await MoveViaCopyAsync(photoId, relativePath, source);
+        Func<Task<MoveResult>> copyInstead = () => MoveViaCopyAsync(job, relativePath, TypedCollectionFor(job.Kind));
+        return MoveRouting.IsAppFolder(source.RelativePath)
+            ? await copyInstead()
+            : await MoveInPlaceAsync(job, relativePath, copyInstead);
+    }
 
-        var uri = (await ResolveTypedUrisAsync([photoId])).First();
+    /// <summary>
+    /// Moves into a folder picked with the system folder browser, by the gallery's rules
+    /// (<see cref="MoveRouting.RouteForBrowsed"/>): in place where MediaStore allows it, never into
+    /// the top of the storage or an app's folder.
+    /// </summary>
+    private async Task<MoveResult> MoveIntoBrowsedFolderAsync(MoveJob job)
+    {
+        // Older versions also kept folders of other providers; those copies can't be checked
+        // (see PickExternalFolderAsync), and the original is removed after the copy.
+        var treeUri = AndroidUri.Parse(job.Album.Id[SafPrefix.Length..]);
+        if (treeUri is null || TreeDocumentIdOf(job.Album) is not { } browsed)
+            return MoveResult.Failed(OtherProviderRefused);
+
+        var relativePath = MoveRouting.Canonical(MoveRouting.RelativePathOfGrant(browsed));
+        switch (MoveRouting.RouteForBrowsed(browsed, job.Source.VolumeName, job.Source.RelativePath,
+                    job.Kind, VideosAllowedInPictures))
+        {
+            case BrowsedRoute.NotPossible:
+                return MoveResult.Failed(BrowsedFolderProblem(browsed) ?? CouldNotWriteInto(job.Album));
+
+            case BrowsedRoute.AlreadyThere:
+                return MoveResult.Moved(job.PhotoId); // a copy would only give it a new identity
+
+            case BrowsedRoute.InPlace:
+                // Should MediaStore still refuse, copy within the same volume.
+                return await MoveInPlaceAsync(job, relativePath,
+                    browsed.StartsWith(PrimaryVolume, StringComparison.Ordinal)
+                        ? () => MoveViaCopyAsync(job, relativePath, TypedCollectionFor(job.Kind))
+                        : () => MoveViaSafAsync(job, treeUri, folderDocumentId: null));
+
+            case BrowsedRoute.MediaCopy:
+                return await MoveViaCopyAsync(job, relativePath, TypedCollectionFor(job.Kind));
+
+            case BrowsedRoute.FilesCopy:
+                return await MoveViaCopyAsync(job, relativePath, FilesUri);
+
+            default:
+                return await MoveViaSafAsync(job, treeUri, folderDocumentId: null);
+        }
+    }
+
+    /// <summary>
+    /// Moves the item itself, after the write consent Android asks for: same id, every detail
+    /// kept. <paramref name="copyInstead"/> runs when MediaStore still refuses the move.
+    /// </summary>
+    private async Task<MoveResult> MoveInPlaceAsync(MoveJob job, string relativePath, Func<Task<MoveResult>> copyInstead)
+    {
+        var uri = (await ResolveTypedUrisAsync([job.PhotoId])).First();
+        bool moved;
         try
         {
             if (OperatingSystem.IsAndroidVersionAtLeast(30))
@@ -539,41 +791,137 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
                 // Ask for write access to this photo (system dialog), then move it.
                 var pending = MediaStore.CreateWriteRequest(Resolver, new List<AndroidUri> { uri });
                 if (!await IntentSenderLauncher.LaunchAsync(pending.IntentSender))
-                    return null;
+                    return MoveResult.Cancelled;
             }
 
-            if (await Task.Run(() => UpdateRelativePath(uri, relativePath)))
-                return photoId; // moved in place — same id, all metadata intact
-
-            // Some sources still refuse the in-place move — fall back to copy + delete.
-            return await MoveViaCopyAsync(photoId, relativePath, source);
+            moved = await Task.Run(() => UpdateRelativePath(uri, relativePath));
         }
         catch (Java.Lang.SecurityException ex)
         {
             // Android 10 path: consent is requested via RecoverableSecurityException.
             if (ex is not RecoverableSecurityException recoverable)
-                return null;
+                return MoveResult.Failed(RefusedMove(job.Album));
 
             if (!await IntentSenderLauncher.LaunchAsync(recoverable.UserAction.ActionIntent.IntentSender))
-                return null;
+                return MoveResult.Cancelled;
 
             try
             {
-                return await Task.Run(() => UpdateRelativePath(uri, relativePath)) ? photoId : null;
+                return await Task.Run(() => UpdateRelativePath(uri, relativePath))
+                    ? MoveResult.Moved(job.PhotoId)
+                    : MoveResult.Failed(RefusedMove(job.Album));
             }
             catch
             {
-                return null;
+                return MoveResult.Failed(RefusedMove(job.Album));
             }
         }
         catch (Java.Lang.Exception)
         {
-            return await MoveViaCopyAsync(photoId, relativePath, source);
+            moved = false; // some sources still refuse the in-place move
         }
         catch
         {
-            return null;
+            return MoveResult.Failed(RefusedMove(job.Album));
         }
+
+        // Moved in place: same id, all metadata intact. Otherwise copy, then remove the original.
+        return moved ? MoveResult.Moved(job.PhotoId) : await copyInstead();
+    }
+
+    private static string RefusedMove(AlbumInfo album) => $"Android refused to move it into {album.Name}.";
+
+    private static string CouldNotCopyInto(AlbumInfo album, Exception? error = null) =>
+        IsOutOfSpace(error)
+            ? NoSpaceForCopy
+            : $"Couldn't copy it into {album.Name}, so nothing was moved.";
+
+    private static string CouldNotWriteInto(AlbumInfo album, Exception? error = null) =>
+        IsOutOfSpace(error)
+            ? NoSpaceForCopy
+            : $"Couldn't write into {album.Name}, so nothing was moved. The folder may have been " +
+              "deleted, or access to it withdrawn.";
+
+    private const string NoSpaceForCopy = "There isn't enough free space for the copy, so nothing was moved.";
+
+    private const string AppFolderRefused =
+        "That folder belongs to another app, and Android deletes it with the app, so Sort & Delete " +
+        "doesn't move photos there. Nothing was moved.";
+
+    private const string StorageTopRefused =
+        "Sort & Delete doesn't put photos at the top level of the storage. Choose a folder inside it, " +
+        "or create one there.";
+
+    private const string OtherProviderRefused =
+        "Sort & Delete moves photos only into folders on this phone's own storage or its SD card, " +
+        "where it can check the copy before it removes the original. Choose a folder there.";
+
+    private static string LocationWouldBeLost(MoveJob job) =>
+        "Moving it there means copying it, and Android won't let Sort & Delete read where it " +
+        "was taken, so the copy would lose its location. Nothing was moved." + InPlaceHint(job);
+
+    /// <summary>
+    /// " DCIM and Pictures take it without a copy." (the folders for its kind), or "" where every
+    /// move is a copy: out of an app's folder, or off an SD card into internal storage.
+    /// </summary>
+    private static string InPlaceHint(MoveJob job) =>
+        MoveRouting.IsAppFolder(job.Source.RelativePath) || !IsOnInternalStorage(job.Source)
+            ? ""
+            : " " + MoveRouting.InWords(MoveRouting.InPlaceFoldersFor(job.Kind, VideosAllowedInPictures)) +
+              " take it without a copy.";
+
+    private static bool IsOnInternalStorage(SourceInfo source) =>
+        source.VolumeName is "" or "external" or "external_primary";
+
+    private const string OriginalNotDeleted = "Android didn't remove the original, so nothing was moved.";
+
+    private const string AndroidTenMovesInPlaceOnly =
+        "On Android 10, Sort & Delete moves photos only within DCIM and Pictures, and videos within DCIM and " +
+        "Movies. Anywhere else it would have to copy them, and Android 10 doesn't let it remove the original " +
+        "afterwards. Choose a folder there.";
+
+    /// <summary>Android 10: a move that needs a copy would leave the original behind (see <see cref="CanRemoveOriginals"/>).</summary>
+    private static string OriginalWouldStay(MoveJob job) =>
+        MoveRouting.IsAppFolder(job.Source.RelativePath)
+            ? "Android 10 doesn't let Sort & Delete remove a photo from another app's folder, so it can't move " +
+              "it out of there. Nothing was moved."
+            : "Moving it there means copying it, and Android 10 doesn't let Sort & Delete remove the original " +
+              "afterwards, so it would be in both places. Nothing was moved." + InPlaceHint(job);
+
+    private static string OriginalLeftBehind(MoveJob job) =>
+        $"It's in {job.Album.Name} now, but Android also kept the original in " +
+        $"{FolderNameOf(job.Source.RelativePath)}, so it's in both places. The original stays in the " +
+        "deck, so you can delete it if you don't need it.";
+
+    private static string CopyKeptBesideOriginal(MoveJob job) =>
+        $"The original stays in {FolderNameOf(job.Source.RelativePath)}, but Sort & Delete couldn't check that " +
+        $"it is whole, so it kept the copy in {job.Album.Name} too. It's in both places. The original stays in " +
+        "the deck, so you can delete it if you don't need it.";
+
+    private static string FolderNameOf(string relativePath) =>
+        relativePath.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault() ?? "its old folder";
+
+    private static bool IsOutOfSpace(Exception? error)
+    {
+        for (var e = error; e is not null; e = e.InnerException)
+        {
+            if (e.Message.Contains("ENOSPC", StringComparison.Ordinal) ||
+                e.Message.Contains("No space left", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
+
+    private static AndroidUri TypedCollectionFor(MediaKind kind) =>
+        kind == MediaKind.Video
+            ? MediaStore.Video.Media.ExternalContentUri!
+            : MediaStore.Images.Media.ExternalContentUri!;
+
+    private async Task<MediaKind> KindOfAsync(string photoId)
+    {
+        await ResolveTypedUrisAsync([photoId]); // fills the kind cache
+        lock (_kindCache)
+            return _kindCache.GetValueOrDefault(photoId, MediaKind.Image);
     }
 
     private sealed record SourceInfo(
@@ -582,7 +930,12 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         string RelativePath,
         long TakenMs,
         long ModifiedSec,
+        string VolumeName,
+        long SizeBytes,
         bool IsFavorite);
+
+    /// <summary>One move: the item, what and where it is, where it goes, and the screen that asked.</summary>
+    private sealed record MoveJob(string PhotoId, SourceInfo Source, MediaKind Kind, AlbumInfo Album, MoveFeedback? Feedback);
 
     private SourceInfo? QuerySourceInfo(string photoId)
     {
@@ -594,6 +947,8 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             MediaStore.Images.Media.InterfaceConsts.RelativePath,
             MediaStore.Images.Media.InterfaceConsts.DateTaken,
             MediaStore.Images.Media.InterfaceConsts.DateModified,
+            ColVolumeName,
+            MediaStore.Images.Media.InterfaceConsts.Size,
         ];
         if (hasFavorite)
             projection.Add(ColIsFavorite);
@@ -608,125 +963,491 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             cursor.IsNull(2) ? "" : cursor.GetString(2) ?? "",
             cursor.IsNull(3) ? 0 : cursor.GetLong(3),
             cursor.IsNull(4) ? 0 : cursor.GetLong(4),
-            hasFavorite && !cursor.IsNull(5) && cursor.GetInt(5) == 1);
+            cursor.IsNull(5) ? "" : cursor.GetString(5) ?? "",
+            cursor.IsNull(6) ? 0 : cursor.GetLong(6),
+            hasFavorite && !cursor.IsNull(7) && cursor.GetInt(7) == 1);
+    }
+
+    /// <summary>The bytes a copy is made from, or why there is no copy.</summary>
+    private sealed record CopySource(AndroidUri? Uri, MoveResult? Refusal);
+
+    /// <summary>
+    /// The uri to copy an item's bytes from, location included. Android blanks the location in
+    /// media the app didn't create unless the app holds ACCESS_MEDIA_LOCATION and asks for the
+    /// original. Without that access (Android 14+ never grants it while the app may see selected
+    /// photos only) the copy keeps every byte only if the item has no location to blank; when it
+    /// has one, or Android can't say (videos), the user decides whether the copy may lose it.
+    /// The original is removed after the copy, so nothing is lost without asking.
+    /// </summary>
+    private async Task<CopySource> OriginalForCopyAsync(MoveJob job)
+    {
+        bool granted = await Permissions.CheckStatusAsync<MediaLocationPermission>() == PermissionStatus.Granted ||
+                       await MainThread.InvokeOnMainThreadAsync(() => Permissions.RequestAsync<MediaLocationPermission>())
+                           == PermissionStatus.Granted;
+        if (granted)
+            return new CopySource(MediaStore.SetRequireOriginal(UriFor(job.PhotoId)), null);
+
+        var readable = UriFor(job.PhotoId);
+        if (job.Kind == MediaKind.Image && await Task.Run(() => HasNoLocation(readable, job.Source.MimeType)))
+            return new CopySource(readable, null); // nothing blanked: every byte is the original's
+
+        if (job.Feedback?.ConfirmAsync is not { } confirm)
+            return new CopySource(null, MoveResult.Failed(LocationWouldBeLost(job)));
+
+        var limited = await HasLimitedAccessAsync()
+            ? "With access to selected photos only, Android hides where photos were taken. "
+            : "Android won't let Sort & Delete read where it was taken. ";
+        bool proceed = await MainThread.InvokeOnMainThreadAsync(() => confirm(
+            "Its location would be lost",
+            limited + $"Moving it to {job.Album.Name} means copying it, so the copy wouldn't keep its " +
+            $"location.{InPlaceHint(job)} Move it anyway?",
+            "Move anyway"));
+        return proceed
+            ? new CopySource(readable, null)
+            : new CopySource(null, MoveResult.Cancelled);
     }
 
     /// <summary>
-    /// Move by copying through MediaStore (new row we own, no consent needed) and then
-    /// deleting the original (one consent dialog). Rolls the copy back if the user denies.
-    /// Bytes are copied verbatim, so in-file metadata (EXIF date, GPS location, camera)
-    /// survives; the taken-date, file time and favorite flag are carried over explicitly.
-    /// Returns the NEW item's id, or null on failure.
+    /// Whether a photo certainly carries no location, read as the app sees it: Android blanks a
+    /// location's values but keeps its tags, so a photo with a hidden location still shows them.
+    /// Unknown counts as having one: a type ExifInterface can't read (it reports no tags rather
+    /// than failing), a JPEG it didn't parse, and any XMP, which can hold a location too.
+    /// Blocking.
     /// </summary>
-    private async Task<string?> MoveViaCopyAsync(string photoId, string targetRelativePath, SourceInfo source)
+    private static bool HasNoLocation(AndroidUri photo, string mimeType)
     {
-        if (string.IsNullOrEmpty(source.DisplayName))
-            return null;
+        if (!ExifReadableTypes.Contains(mimeType.ToLowerInvariant()))
+            return false;
+        try
+        {
+            using var input = Resolver.OpenInputStream(photo);
+            if (input is null)
+                return false;
+            var exif = new Android.Media.ExifInterface(input);
+            if (mimeType.Equals("image/jpeg", StringComparison.OrdinalIgnoreCase) &&
+                exif.GetAttributeInt("ImageWidth", 0) == 0 && exif.GetAttributeInt("ImageLength", 0) == 0)
+                return false; // a JPEG gives its size even without EXIF (missing reads as 0): this one wasn't read
+            if (exif.GetAttribute("Xmp") is not null)
+                return false;
+            return GpsTags.All(tag => exif.GetAttribute(tag) is null);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
 
-        bool isVideo;
-        lock (_kindCache)
-            isVideo = _kindCache.GetValueOrDefault(photoId) == MediaKind.Video;
-        var targetCollection = isVideo
-            ? MediaStore.Video.Media.ExternalContentUri!
-            : MediaStore.Images.Media.ExternalContentUri!;
+    /// <summary>The types ExifInterface reads.</summary>
+    private static readonly string[] ExifReadableTypes =
+        ["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif", "image/x-adobe-dng"];
 
-        AndroidUri? newUri = null;
+    /// <summary>Every EXIF GPS tag: Android blanks them all.</summary>
+    private static readonly string[] GpsTags =
+    [
+        "GPSVersionID", "GPSLatitudeRef", "GPSLatitude", "GPSLongitudeRef", "GPSLongitude",
+        "GPSAltitudeRef", "GPSAltitude", "GPSTimeStamp", "GPSSatellites", "GPSStatus", "GPSMeasureMode",
+        "GPSDOP", "GPSSpeedRef", "GPSSpeed", "GPSTrackRef", "GPSTrack", "GPSImgDirectionRef",
+        "GPSImgDirection", "GPSMapDatum", "GPSDestLatitudeRef", "GPSDestLatitude", "GPSDestLongitudeRef",
+        "GPSDestLongitude", "GPSDestBearingRef", "GPSDestBearing", "GPSDestDistanceRef", "GPSDestDistance",
+        "GPSProcessingMethod", "GPSAreaInformation", "GPSDateStamp", "GPSDifferential", "GPSHPositioningError",
+    ];
+
+    /// <summary>A copy, checked: how many bytes it holds, all of the original's.</summary>
+    private sealed record CopyReport(long Length);
+
+    /// <summary>Items at least this big show how far their copy has got.</summary>
+    private const long ProgressFromBytes = 16L * 1024 * 1024;
+
+    /// <summary>
+    /// Copies every byte of <paramref name="original"/> (see <see cref="OriginalForCopyAsync"/>)
+    /// into <paramref name="target"/>, has the copy written out to storage, then reads it back
+    /// through a new descriptor: it must hold the original's length and the same SHA-256 as what
+    /// was read, or this throws. What was read must also be as long as the original MediaStore
+    /// knows (<paramref name="originalSize"/>; 0 when unknown): a stream Android converted (a
+    /// transcoded video) or cut short would pass the other checks. Blanking a location keeps the
+    /// length. The original is removed next, so nothing less may pass for a copy. Blocking: call
+    /// it off the UI thread.
+    /// </summary>
+    private static CopyReport CopyVerified(AndroidUri original, AndroidUri target, long originalSize, IProgress<double>? progress)
+    {
+        var buffer = new byte[256 * 1024];
+        long length = 0;
+        byte[] copiedHash;
+        CopyProgress? reporter;
+
+        var source = Resolver.OpenFileDescriptor(original, "r") ?? throw new IOException("Could not open the original.");
+        try
+        {
+            long expected = source.StatSize; // -1 when the size can't be known
+            reporter = progress is not null && expected >= ProgressFromBytes ? new CopyProgress(progress, expected) : null;
+
+            var destination = Resolver.OpenFileDescriptor(target, "w") ?? throw new IOException("Could not open the copy.");
+            try
+            {
+                using var input = StreamOn(source, FileAccess.Read);
+                using var output = StreamOn(destination, FileAccess.Write);
+                using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    output.Write(buffer, 0, read);
+                    hash.AppendData(buffer, 0, read);
+                    length += read;
+                    reporter?.Report(length);
+                }
+                output.Flush(flushToDisk: true); // fsync: on storage, not just handed to it
+                copiedHash = hash.GetHashAndReset();
+            }
+            finally
+            {
+                CloseQuietly(destination);
+            }
+
+            if (expected >= 0 && length != expected)
+                throw new IOException($"Copied {length} of {expected} bytes.");
+            if (originalSize > 0 && length != originalSize)
+                throw new IOException($"Read {length} bytes of an original of {originalSize}.");
+        }
+        finally
+        {
+            CloseQuietly(source);
+        }
+
+        // What storage holds now, read through a new descriptor.
+        var check = Resolver.OpenFileDescriptor(target, "r") ?? throw new IOException("Could not reopen the copy.");
+        try
+        {
+            if (check.StatSize >= 0 && check.StatSize != length)
+                throw new IOException($"The copy holds {check.StatSize} of {length} bytes.");
+
+            using var input = StreamOn(check, FileAccess.Read);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long readBack = 0;
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                hash.AppendData(buffer, 0, read);
+                readBack += read;
+                reporter?.Report(length + readBack);
+            }
+
+            if (readBack != length || !hash.GetHashAndReset().AsSpan().SequenceEqual(copiedHash))
+                throw new IOException("The copy doesn't match the original.");
+        }
+        finally
+        {
+            CloseQuietly(check);
+        }
+
+        reporter?.Report(2 * length);
+        return new CopyReport(length);
+    }
+
+    /// <summary>A stream straight on the descriptor's file, which stays the caller's to close.</summary>
+    private static FileStream StreamOn(ParcelFileDescriptor descriptor, FileAccess access) =>
+        new(new SafeFileHandle(new IntPtr(descriptor.Fd), ownsHandle: false), access, bufferSize: 0);
+
+    /// <summary>Closes the file (Dispose alone only drops the Java reference) and the reference.</summary>
+    private static void CloseQuietly(ParcelFileDescriptor descriptor)
+    {
+        try
+        {
+            descriptor.Close();
+        }
+        catch (Java.IO.IOException)
+        {
+            // closing a read or a synced write loses nothing
+        }
+        descriptor.Dispose();
+    }
+
+    /// <summary>Reports a copy in whole percents: writing is the first half, reading it back the second.</summary>
+    private sealed class CopyProgress(IProgress<double> progress, long length)
+    {
+        private int _percent = -1;
+
+        public void Report(long done)
+        {
+            int percent = (int)Math.Min(100, done * 100 / (2 * length));
+            if (percent == _percent)
+                return;
+            _percent = percent;
+            progress.Report(percent / 100.0);
+        }
+    }
+
+    /// <summary>The date the gallery shows for an item, in ms: when it was taken, else its file time.</summary>
+    private static long DateOf(SourceInfo source) => source.TakenMs > 0 ? source.TakenMs : source.ModifiedSec * 1000L;
+
+    /// <summary>
+    /// Gives a copy the original's date (<see cref="DateOf"/>) and checks that it stuck. A copy is a
+    /// new file, so Android dates it by when it was written unless it carries a capture date
+    /// Android can read, and even then not always: an EXIF time without a time zone is read
+    /// against the file's time. Needs write access to <paramref name="copy"/>: the app's own
+    /// copy, or the grant <see cref="MediaUriOf"/> carries over. Blocking.
+    /// </summary>
+    private static bool KeepDate(AndroidUri copy, SourceInfo source)
+    {
+        long wanted = DateOf(source);
+        if (wanted <= 0 || IsDated(copy, wanted))
+            return true;
+
         try
         {
             var values = new ContentValues();
-            values.Put(MediaStore.Images.Media.InterfaceConsts.DisplayName, source.DisplayName);
-            values.Put(MediaStore.Images.Media.InterfaceConsts.MimeType, source.MimeType);
-            values.Put(MediaStore.Images.Media.InterfaceConsts.RelativePath, targetRelativePath);
-            if (source.TakenMs > 0)
-                values.Put(MediaStore.Images.Media.InterfaceConsts.DateTaken, source.TakenMs);
-            values.Put("is_pending", 1);
+            values.Put(MediaStore.Images.Media.InterfaceConsts.DateTaken, wanted);
+            Resolver.Update(copy, values, null, null);
+        }
+        catch (Java.Lang.Exception)
+        {
+            // refused: the check below says so
+        }
+        return IsDated(copy, wanted);
+    }
 
-            newUri = Resolver.Insert(targetCollection, values);
-            if (newUri is null)
-                return null;
+    /// <summary>Whether MediaStore dates the item at <paramref name="wanted"/> (ms), the way the gallery reads it.</summary>
+    private static bool IsDated(AndroidUri item, long wanted)
+    {
+        try
+        {
+            using var cursor = Resolver.Query(item,
+                [MediaStore.Images.Media.InterfaceConsts.DateTaken, MediaStore.Images.Media.InterfaceConsts.DateModified],
+                null, null, null);
+            if (cursor is null || !cursor.MoveToFirst())
+                return false;
 
-            using (var input = Resolver.OpenInputStream(UriFor(photoId)))
-            using (var output = Resolver.OpenOutputStream(newUri))
+            long taken = cursor.IsNull(0) ? 0 : cursor.GetLong(0);
+            long date = taken > 0 ? taken : (cursor.IsNull(1) ? 0 : cursor.GetLong(1) * 1000L);
+            return Math.Abs(date - wanted) < 1000;
+        }
+        catch (Java.Lang.Exception)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Asks whether to move although the copy can't keep the original's date, before the original
+    /// is touched. Without anyone to ask, the move goes ahead.
+    /// </summary>
+    private static async Task<bool> ConfirmRedatingAsync(MoveJob job)
+    {
+        if (job.Feedback?.ConfirmAsync is not { } confirm)
+            return true;
+
+        return await MainThread.InvokeOnMainThreadAsync(() => confirm(
+            "It would be dated today",
+            $"Android won't let Sort & Delete give the copy in {job.Album.Name} its original date, " +
+            "so it would show up as taken today. Move it anyway?",
+            "Move anyway"));
+    }
+
+    /// <summary>
+    /// Move by copying through MediaStore (a new item the app owns, no consent needed), then
+    /// removing the original (one consent dialog). The copy is written while pending, so no other
+    /// app sees it, and MediaStore purges it should the move never finish; it is published only
+    /// once checked (<see cref="CopyVerified"/>). Bytes are copied verbatim, so in-file metadata
+    /// (EXIF date, GPS location, camera) survives; the date, file time and favourite are carried
+    /// over explicitly. <paramref name="targetCollection"/> must accept the folder: the item's typed
+    /// collection under DCIM/Pictures/Movies, the files table under Download/ and Documents/.
+    /// Moved results carry the NEW item's id.
+    /// </summary>
+    private async Task<MoveResult> MoveViaCopyAsync(MoveJob job, string targetRelativePath, AndroidUri targetCollection)
+    {
+        if (!CanRemoveOriginals)
+            return MoveResult.Failed(OriginalWouldStay(job));
+
+        var source = job.Source;
+        if (string.IsNullOrEmpty(source.DisplayName))
+            return MoveResult.Failed(CouldNotCopyInto(job.Album));
+
+        var copySource = await OriginalForCopyAsync(job);
+        if (copySource.Uri is not { } original)
+            return copySource.Refusal ?? MoveResult.Failed(LocationWouldBeLost(job));
+
+        AndroidUri? copy = null;
+        CopyReport copied;
+        try
+        {
+            copied = await Task.Run(() =>
             {
-                if (input is null || output is null)
-                    throw new IOException("Could not open streams for copy.");
-                await input.CopyToAsync(output);
-                await output.FlushAsync();
+                var values = new ContentValues();
+                values.Put(MediaStore.Images.Media.InterfaceConsts.DisplayName, source.DisplayName);
+                values.Put(MediaStore.Images.Media.InterfaceConsts.MimeType, source.MimeType);
+                values.Put(MediaStore.Images.Media.InterfaceConsts.RelativePath, targetRelativePath);
+                if (DateOf(source) > 0)
+                    values.Put(MediaStore.Images.Media.InterfaceConsts.DateTaken, DateOf(source));
+                values.Put(ColIsPending, 1);
+
+                copy = Resolver.Insert(targetCollection, values) ?? throw new IOException("MediaStore refused the copy.");
+                var report = CopyVerified(original, copy, source.SizeBytes, job.Feedback?.Progress);
+
+                // The file time first, so publishing reads it: gallery apps date items without a
+                // capture date by it.
+                SetFileTime(copy, source.ModifiedSec);
+
+                var publish = new ContentValues();
+                publish.Put(ColIsPending, 0);
+                if (source.IsFavorite && OperatingSystem.IsAndroidVersionAtLeast(30))
+                    publish.Put(ColIsFavorite, 1); // keep the ⭐ flag on the copy
+
+                // A copy left pending is purged by MediaStore within days, after the original is gone.
+                if (Resolver.Update(copy, publish, null, null) <= 0)
+                    throw new IOException("The copy could not be published.");
+                return report;
+            });
+        }
+        catch (Exception ex)
+        {
+            await Task.Run(() => TryDeleteOwnCopy(copy));
+            return MoveResult.Failed(CouldNotCopyInto(job.Album, ex));
+        }
+
+        var published = copy!;
+        var newId = ContentUris.ParseId(published).ToString();
+        lock (_kindCache)
+            _kindCache[newId] = job.Kind;
+
+        if (!await Task.Run(() => KeepDate(published, source)) && !await ConfirmRedatingAsync(job))
+        {
+            await Task.Run(() => TryDeleteOwnCopy(published));
+            return MoveResult.Cancelled;
+        }
+
+        return await FinishMoveAsync(job, copied, newId, () => TryDeleteOwnCopy(published));
+    }
+
+    /// <summary>
+    /// The copy is in place and checked: removes the original behind one consent dialog (into the
+    /// system trash on Android 11+, where it stays restorable for 30 days) and settles the
+    /// result. <paramref name="rollBack"/> deletes the copy; it runs only when the original is
+    /// certainly still there, whole: a consent dialog can end without reporting success although
+    /// the original went, and report success although it stayed.
+    /// </summary>
+    private async Task<MoveResult> FinishMoveAsync(MoveJob job, CopyReport copied, string? newId, Action rollBack)
+    {
+        var removed = await RemoveOriginalAsync(job.PhotoId);
+        bool stillThere = await Task.Run(() => IsInGallery(job.PhotoId));
+
+        if (removed != MoveOutcome.Moved && stillThere && await Task.Run(() => OpensAtSize(job.PhotoId, copied.Length)))
+        {
+            await Task.Run(rollBack);
+            return removed == MoveOutcome.Cancelled ? MoveResult.Cancelled : MoveResult.Failed(OriginalNotDeleted);
+        }
+
+        // The copy stays. If the original stayed too, it is in both places, and the user is told.
+        if (!stillThere)
+            return MoveResult.Moved(newId);
+        return MoveResult.CopiedWithOriginalKept(newId,
+            removed == MoveOutcome.Moved ? OriginalLeftBehind(job) : CopyKeptBesideOriginal(job));
+    }
+
+    /// <summary>
+    /// Removes the original after its copy is checked, behind one consent dialog: into the system
+    /// trash on Android 11+, so it can still be restored for 30 days; deleted on Android 10, which
+    /// has no trash. Moved once Android reports it done, Cancelled when the user declines, Failed
+    /// when Android refuses. Never throws, so the caller always gets to settle the copy.
+    /// </summary>
+    private async Task<MoveOutcome> RemoveOriginalAsync(string photoId)
+    {
+        try
+        {
+            var typedUris = await ResolveTypedUrisAsync([photoId]);
+            if (OperatingSystem.IsAndroidVersionAtLeast(30))
+            {
+                var pending = MediaStore.CreateTrashRequest(Resolver, typedUris, true);
+                return await IntentSenderLauncher.LaunchAsync(pending.IntentSender)
+                    ? MoveOutcome.Moved
+                    : MoveOutcome.Cancelled;
             }
 
-            var publish = new ContentValues();
-            publish.Put("is_pending", 0);
-            if (source.IsFavorite && OperatingSystem.IsAndroidVersionAtLeast(30))
-                publish.Put(ColIsFavorite, 1); // keep the ⭐ flag on the copy
-            Resolver.Update(newUri, publish, null, null);
-
-            // Preserve the file's modified time so EXIF-less items keep their month.
-            PreserveFileTime(newUri, source.ModifiedSec);
+            return await DeleteWithConsentAsync(typedUris.First()) switch
+            {
+                DeleteResult.Deleted => MoveOutcome.Moved,
+                DeleteResult.Declined => MoveOutcome.Cancelled,
+                _ => MoveOutcome.Failed,
+            };
         }
         catch
         {
-            TryDeleteOwnCopy(newUri);
-            return null;
+            return MoveOutcome.Failed;
         }
-
-        // Delete the original — this is a move, not a copy.
-        bool deleted;
-        var typedUris = await ResolveTypedUrisAsync([photoId]);
-        if (OperatingSystem.IsAndroidVersionAtLeast(30))
-        {
-            try
-            {
-                var pending = MediaStore.CreateDeleteRequest(Resolver, typedUris);
-                deleted = await IntentSenderLauncher.LaunchAsync(pending.IntentSender);
-            }
-            catch (Java.Lang.Exception)
-            {
-                deleted = false;
-            }
-        }
-        else
-        {
-            deleted = await DeleteWithConsentAsync(typedUris.First());
-        }
-
-        if (!deleted)
-        {
-            TryDeleteOwnCopy(newUri); // user backed out — don't leave a duplicate behind
-            return null;
-        }
-
-        var newId = ContentUris.ParseId(newUri).ToString();
-        lock (_kindCache)
-            _kindCache[newId] = isVideo ? MediaKind.Video : MediaKind.Image;
-        return newId;
     }
 
-    /// <summary>Sets the new (own) file's mtime to the source's and refreshes its MediaStore row.</summary>
-    private void PreserveFileTime(AndroidUri ownUri, long modifiedSec)
+    /// <summary>
+    /// Whether the gallery still has the item: not deleted, and not in the system trash. Asks the
+    /// collection: a query on the item's own uri finds it in the trash too. Blocking.
+    /// </summary>
+    private static bool IsInGallery(string photoId)
+    {
+        try
+        {
+            using var cursor = Resolver.Query(FilesUri, [MediaStore.Images.Media.InterfaceConsts.Id],
+                $"{MediaStore.Images.Media.InterfaceConsts.Id} = ?", [photoId], null);
+            return cursor is not null && cursor.MoveToFirst();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the item still opens at the length it was copied with. Unknown counts as no: a
+    /// duplicate is better than losing the photo. Blocking.
+    /// </summary>
+    private static bool OpensAtSize(string photoId, long length)
+    {
+        try
+        {
+            var descriptor = Resolver.OpenFileDescriptor(UriFor(photoId), "r");
+            if (descriptor is null)
+                return false;
+            try
+            {
+                return descriptor.StatSize == length;
+            }
+            finally
+            {
+                CloseQuietly(descriptor);
+            }
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Sets the file time of a copy the app owns to the original's (best effort; Android 10 gives
+    /// apps no file access to shared storage). Blocking.
+    /// </summary>
+    private static void SetFileTime(AndroidUri ownUri, long modifiedSec)
     {
         if (modifiedSec <= 0)
             return;
         try
         {
-            string? path = null;
-            using (var cursor = Resolver.Query(ownUri, ["_data"], null, null, null))
-            {
-                if (cursor is not null && cursor.MoveToFirst() && !cursor.IsNull(0))
-                    path = cursor.GetString(0);
-            }
-            if (path is null)
-                return;
-
-            var file = new Java.IO.File(path);
-            if (file.SetLastModified(modifiedSec * 1000L))
-            {
-                Android.Media.MediaScannerConnection.ScanFile(
-                    Application.Context, [path], null, null); // refresh date_modified in the index
-            }
+            using var cursor = Resolver.Query(ownUri, ["_data"], null, null, null);
+            if (cursor is not null && cursor.MoveToFirst() && !cursor.IsNull(0) && cursor.GetString(0) is { } path)
+                TrySetFileTime(path, modifiedSec);
         }
-        catch
+        catch (Java.Lang.Exception)
         {
-            // cosmetic — the copy still succeeded
+            // cosmetic: the date the app shows is kept by KeepDate
+        }
+    }
+
+    private static bool TrySetFileTime(string path, long modifiedSec)
+    {
+        try
+        {
+            File.SetLastWriteTimeUtc(path, DateTimeOffset.FromUnixTimeSeconds(modifiedSec).UtcDateTime);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 
@@ -751,20 +1472,22 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         return Resolver.Update(uri, values, null, null) > 0;
     }
 
-    public Task<AlbumInfo?> CreateAlbumAsync(string name)
+    public Task<AlbumInfo?> CreateAlbumAsync(string name, MediaKind kind)
     {
         // On Android an album is just a folder — it comes into existence with the first
-        // photo moved into it, so nothing to create up front.
+        // photo moved into it, so nothing to create up front. It goes where that move is in
+        // place: Pictures/, or Movies/ for a video on Android 10.
         var safe = string.Join("_", name.Split(Path.GetInvalidFileNameChars(), StringSplitOptions.RemoveEmptyEntries)).Trim();
         if (string.IsNullOrWhiteSpace(safe))
             return Task.FromResult<AlbumInfo?>(null);
 
+        var path = $"{MoveRouting.NewAlbumRoot(kind, VideosAllowedInPictures)}/{safe}/";
         return Task.FromResult<AlbumInfo?>(new AlbumInfo
         {
-            Id = $"Pictures/{safe}/",
+            Id = path,
             Name = safe,
             Count = 0,
-            Subtitle = $"Pictures/{safe}/",
+            Subtitle = path,
         });
     }
 
@@ -804,7 +1527,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
 
     public bool SupportsFolderBrowsing => true;
 
-    public async Task<AlbumInfo?> PickExternalFolderAsync()
+    public async Task<FolderPick> PickExternalFolderAsync(MediaKind kind)
     {
         var intent = new Intent(Intent.ActionOpenDocumentTree);
         intent.AddFlags(ActivityFlags.GrantReadUriPermission
@@ -813,7 +1536,22 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
 
         var result = await ActivityLauncher.LaunchForResultAsync(intent);
         if (result?.Data is not AndroidUri treeUri)
-            return null;
+            return FolderPick.None;
+
+        // Only folders on the device's own storage. Other providers (cloud, network, the
+        // Downloads app) may store the copy only after reporting it written, or not at all, and
+        // the original is removed next. Refused folders aren't kept, so their one-off grant lapses.
+        var album = SafAlbumFor(treeUri.ToString()!);
+        if (TreeDocumentIdOf(album) is not { } picked)
+            return new FolderPick(Album: null, OtherProviderRefused);
+
+        // The top of the storage (Android 10's picker offers it) or another app's folder.
+        if (BrowsedFolderProblem(picked) is { } problem)
+            return new FolderPick(Album: null, problem);
+
+        if (!CanRemoveOriginals &&
+            MoveRouting.RouteFor(MoveRouting.RelativePathOfGrant(picked), kind, VideosAllowedInPictures) != MoveRoute.InPlace)
+            return new FolderPick(Album: null, AndroidTenMovesInPlaceOnly);
 
         try
         {
@@ -827,7 +1565,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         }
 
         RememberSafFolder(treeUri.ToString()!);
-        return SafAlbumFor(treeUri.ToString()!);
+        return new FolderPick(album);
     }
 
     private static void RememberSafFolder(string treeUri)
@@ -872,114 +1610,311 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         };
     }
 
-    private async Task<string?> MoveViaSafAsync(string photoId, string treeUriString)
+    private static bool IsBrowsedFolder(AlbumInfo album) => album.Id.StartsWith(SafPrefix, StringComparison.Ordinal);
+
+    /// <summary>The tree document id of a browsed internal-storage or SD card folder; null for other providers.</summary>
+    private static string? TreeDocumentIdOf(AlbumInfo browsedFolder)
     {
-        var treeUri = AndroidUri.Parse(treeUriString);
-        if (treeUri is null)
-            return null;
-
-        var source = await Task.Run(() => QuerySourceInfo(photoId));
-        if (source is null || string.IsNullOrEmpty(source.DisplayName))
-            return null;
-
-        // Copy the bytes into the picked folder
-        AndroidUri? newDoc;
         try
         {
-            var parentDoc = DocumentsContract.BuildDocumentUriUsingTree(
-                treeUri, DocumentsContract.GetTreeDocumentId(treeUri)!);
-            newDoc = DocumentsContract.CreateDocument(Resolver, parentDoc!, source.MimeType, source.DisplayName);
-            if (newDoc is null)
-                return null;
-
-            using var input = Resolver.OpenInputStream(UriFor(photoId));
-            using var output = Resolver.OpenOutputStream(newDoc);
-            if (input is null || output is null)
-                return null;
-            await input.CopyToAsync(output);
-            await output.FlushAsync();
+            var tree = AndroidUri.Parse(browsedFolder.Id[SafPrefix.Length..]);
+            return tree?.Authority == ExternalStorageAuthority ? DocumentsContract.GetTreeDocumentId(tree) : null;
         }
-        catch
+        catch (Java.Lang.Exception)
         {
-            return null; // grant revoked or target not writable
-        }
-
-        // Delete the original (one consent dialog) — this is a move, not a copy.
-        bool deleted;
-        var typedUris = await ResolveTypedUrisAsync([photoId]);
-        if (OperatingSystem.IsAndroidVersionAtLeast(30))
-        {
-            try
-            {
-                var pending = MediaStore.CreateDeleteRequest(Resolver, typedUris);
-                deleted = await IntentSenderLauncher.LaunchAsync(pending.IntentSender);
-            }
-            catch (Java.Lang.Exception)
-            {
-                deleted = false;
-            }
-        }
-        else
-        {
-            deleted = await DeleteWithConsentAsync(typedUris.First());
-        }
-        if (!deleted)
-        {
-            try
-            {
-                DocumentsContract.DeleteDocument(Resolver, newDoc); // roll the copy back
-            }
-            catch
-            {
-                // best effort
-            }
             return null;
         }
+    }
 
-        // Resolve the copy's new MediaStore id so the caller can mark it reviewed.
-        return await ResolveSafCopyIdAsync(newDoc, source) ?? photoId;
+    /// <summary>Internal storage and SD cards, whose folder grants are the ones moves can use.</summary>
+    private const string ExternalStorageAuthority = "com.android.externalstorage.documents";
+
+    /// <summary>Tree document ids on internal storage start with this.</summary>
+    private const string PrimaryVolume = "primary:";
+
+    /// <summary>The folder trees this app keeps write access to, with their tree document ids.</summary>
+    private static List<(AndroidUri Tree, string DocumentId)> PersistedFolderGrants()
+    {
+        var grants = new List<(AndroidUri, string)>();
+        foreach (var permission in Resolver.PersistedUriPermissions)
+        {
+            if (!permission.IsWritePermission || permission.Uri is not AndroidUri tree ||
+                tree.Authority != ExternalStorageAuthority || !DocumentsContract.IsTreeUri(tree))
+                continue;
+
+            var documentId = DocumentsContract.GetTreeDocumentId(tree);
+            if (!string.IsNullOrEmpty(documentId))
+                grants.Add((tree, documentId));
+        }
+        return grants;
+    }
+
+    /// <summary>A grant covering the folder at <paramref name="relativePath"/> (internal storage first), and that folder's document id.</summary>
+    private static (AndroidUri Tree, string FolderDocumentId)? FindFolderGrant(
+        List<(AndroidUri Tree, string DocumentId)> grants, string relativePath)
+    {
+        foreach (var (tree, documentId) in grants.OrderBy(g => g.DocumentId.StartsWith(PrimaryVolume, StringComparison.Ordinal) ? 0 : 1))
+        {
+            if (MoveRouting.FolderDocumentId(documentId, relativePath) is { } folder)
+                return (tree, folder);
+        }
+        return null;
     }
 
     /// <summary>
-    /// Derives the on-disk path of a document we just created ("primary:Foo" →
-    /// /storage/emulated/0/Foo/…), preserves the file time when possible, and asks the
-    /// media scanner to index it, returning the resulting MediaStore id.
+    /// Copies the item into a granted folder tree of the device's storage provider —
+    /// <paramref name="folderDocumentId"/> inside it, or its top — and removes the original (one
+    /// consent dialog). The copy is written under a hidden temporary name and named as the item
+    /// only once checked (<see cref="CopyVerified"/>): a copy cut short (the app killed, the phone
+    /// off) must never pass for the photo. Moved results carry the copy's new MediaStore id.
     /// </summary>
-    private static async Task<string?> ResolveSafCopyIdAsync(AndroidUri newDoc, SourceInfo source)
+    private async Task<MoveResult> MoveViaSafAsync(MoveJob job, AndroidUri treeUri, string? folderDocumentId)
+    {
+        if (!CanRemoveOriginals)
+            return MoveResult.Failed(OriginalWouldStay(job));
+
+        var source = job.Source;
+        if (string.IsNullOrEmpty(source.DisplayName))
+            return MoveResult.Failed(CouldNotWriteInto(job.Album));
+
+        var copySource = await OriginalForCopyAsync(job);
+        if (copySource.Uri is not { } original)
+            return copySource.Refusal ?? MoveResult.Failed(LocationWouldBeLost(job));
+
+        AndroidUri? document = null;
+        CopyReport copied;
+        try
+        {
+            copied = await Task.Run(() =>
+            {
+                var parentId = folderDocumentId ?? DocumentsContract.GetTreeDocumentId(treeUri)!;
+                var parent = DocumentsContract.BuildDocumentUriUsingTree(treeUri, parentId)
+                             ?? throw new IOException("The folder is gone.");
+                RemoveLeftoverTemporaries(treeUri, parentId);
+                document = DocumentsContract.CreateDocument(Resolver, parent, "application/octet-stream",
+                               TemporaryNames.New())
+                           ?? throw new IOException("The folder refused a new file.");
+
+                var report = CopyVerified(original, document, source.SizeBytes, job.Feedback?.Progress);
+
+                document = DocumentsContract.RenameDocument(Resolver, document, source.DisplayName)
+                           ?? throw new IOException("The copy could not be named.");
+                return report;
+            });
+        }
+        catch (Exception ex)
+        {
+            await Task.Run(() => TryDeleteDocument(document)); // a partial copy is worse than none
+            return MoveResult.Failed(CouldNotWriteInto(job.Album, ex)); // grant revoked, folder gone, disk full
+        }
+
+        var named = document!;
+        var (media, newId) = await IndexSafCopyAsync(named, source);
+        if (source.IsFavorite && media is not null)
+            await KeepFavoriteAsync(media, job.Kind);
+
+        bool dated = await Task.Run(() => media is not null
+            ? KeepDate(media, source)
+            : newId is not null && IsDated(UriFor(newId), DateOf(source)));
+        if (!dated && !await ConfirmRedatingAsync(job))
+        {
+            await Task.Run(() => TryDeleteDocument(named));
+            return MoveResult.Cancelled;
+        }
+
+        if (newId is not null)
+        {
+            lock (_kindCache)
+                _kindCache[newId] = job.Kind;
+        }
+        return await FinishMoveAsync(job, copied, newId, () => TryDeleteDocument(named));
+    }
+
+    /// <summary>
+    /// Deletes hidden copies an earlier move into this folder left when the app was stopped
+    /// mid-copy (best effort): only files named exactly as <see cref="TemporaryNames"/> makes
+    /// them, never a folder (the provider would delete it with everything inside). Blocking.
+    /// </summary>
+    private static void RemoveLeftoverTemporaries(AndroidUri treeUri, string folderDocumentId)
     {
         try
         {
-            var docId = DocumentsContract.GetDocumentId(newDoc) ?? "";
-            var parts = docId.Split(':', 2);
+            var children = DocumentsContract.BuildChildDocumentsUriUsingTree(treeUri, folderDocumentId);
+            if (children is null)
+                return;
+            // Only ones untouched for an hour: a move from another screen may be writing a newer one.
+            long olderThanMs = DateTimeOffset.UtcNow.AddHours(-1).ToUnixTimeMilliseconds();
+            using var cursor = Resolver.Query(children,
+                ["document_id", "_display_name", "last_modified", "mime_type"], null, null, null);
+            while (cursor is not null && cursor.MoveToNext())
+            {
+                var name = cursor.IsNull(1) ? null : cursor.GetString(1);
+                if (!TemporaryNames.IsTemporary(name) || cursor.GetString(0) is not { } documentId)
+                    continue;
+                if (cursor.IsNull(3) || cursor.GetString(3) == DocumentsContract.Document.MimeTypeDir)
+                    continue;
+                if (cursor.IsNull(2) || cursor.GetLong(2) > olderThanMs)
+                    continue;
+                TryDeleteDocument(DocumentsContract.BuildDocumentUriUsingTree(treeUri, documentId));
+            }
+        }
+        catch (Java.Lang.Exception)
+        {
+            // only tidying
+        }
+    }
+
+    /// <summary>
+    /// Gets a copy made through a folder grant into MediaStore, with the original's file time where
+    /// Android allows it: has the media scanner index it (Android 10 doesn't on its own; later
+    /// versions re-read it), then gets its MediaStore uri, which carries the app's grant on the
+    /// document over (see <see cref="MediaUriOf"/>). Returns the uri to update the copy through,
+    /// and its id; either is null when Android can't say.
+    /// </summary>
+    private static async Task<(AndroidUri? Media, string? Id)> IndexSafCopyAsync(AndroidUri document, SourceInfo source)
+    {
+        var media = await Task.Run(() => MediaUriOf(document)); // indexed as written, from Android 11
+        var path = PathOfDocument(document);
+        AndroidUri? scanned = null;
+        if (path is not null)
+        {
+            if (source.ModifiedSec > 0)
+                await Task.Run(() => TrySetFileTime(path, source.ModifiedSec));
+            scanned = await ScanAsync(path, source.MimeType);
+        }
+        media ??= await Task.Run(() => MediaUriOf(document)); // Android 10: indexed by the scan
+        media ??= scanned;
+        var id = IdOf(media) ?? IdOf(scanned) ?? (path is null ? null : await Task.Run(() => IdByPath(path)));
+        return (media, id);
+    }
+
+    /// <summary>The MediaStore id of the file at <paramref name="path"/>, if the app can see it. Blocking.</summary>
+    private static string? IdByPath(string path)
+    {
+        try
+        {
+            using var cursor = Resolver.Query(FilesUri, [MediaStore.Images.Media.InterfaceConsts.Id], "_data = ?", [path], null);
+            return cursor is not null && cursor.MoveToFirst() ? cursor.GetLong(0).ToString() : null;
+        }
+        catch (Java.Lang.Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>The file of a document of the device's storage provider ("primary:Foo/x.jpg" is /storage/emulated/0/Foo/x.jpg).</summary>
+    private static string? PathOfDocument(AndroidUri document)
+    {
+        try
+        {
+            var parts = (DocumentsContract.GetDocumentId(document) ?? "").Split(':', 2);
             if (parts.Length < 2)
                 return null;
-            var root = parts[0] == "primary" ? "/storage/emulated/0" : $"/storage/{parts[0]}";
-            var path = $"{root}/{parts[1]}";
+            var root = parts[0] == "primary"
+                ? global::Android.OS.Environment.ExternalStorageDirectory?.AbsolutePath ?? "/storage/emulated/0"
+                : $"/storage/{parts[0]}";
+            return $"{root}/{parts[1]}";
+        }
+        catch (Java.Lang.Exception)
+        {
+            return null;
+        }
+    }
 
-            if (source.ModifiedSec > 0)
-            {
-                try
-                {
-                    new Java.IO.File(path).SetLastModified(source.ModifiedSec * 1000L);
-                }
-                catch
-                {
-                    // not always permitted outside media collections — cosmetic
-                }
-            }
-
-            var tcs = new TaskCompletionSource<AndroidUri?>(TaskCreationOptions.RunContinuationsAsynchronously);
+    /// <summary>Has the media scanner (re)index a file; its MediaStore uri, or null after 10 s or on failure.</summary>
+    private static async Task<AndroidUri?> ScanAsync(string path, string mimeType)
+    {
+        try
+        {
+            var done = new TaskCompletionSource<AndroidUri?>(TaskCreationOptions.RunContinuationsAsynchronously);
             Android.Media.MediaScannerConnection.ScanFile(
-                Application.Context, [path], [source.MimeType], new ScanCompletedListener(tcs));
-
-            var completed = await Task.WhenAny(tcs.Task, Task.Delay(4000));
-            if (completed != tcs.Task || tcs.Task.Result is not AndroidUri scanned)
-                return null;
-            return ContentUris.ParseId(scanned).ToString();
+                Application.Context, [path], [mimeType], new ScanCompletedListener(done));
+            return await Task.WhenAny(done.Task, Task.Delay(10_000)) == done.Task ? done.Task.Result : null;
         }
         catch
         {
             return null;
+        }
+    }
+
+    private static string? IdOf(AndroidUri? mediaUri)
+    {
+        try
+        {
+            long id = mediaUri is null ? -1 : ContentUris.ParseId(mediaUri);
+            return id >= 0 ? id.ToString() : null;
+        }
+        catch (Java.Lang.Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The MediaStore uri of a document in a granted tree. Asking for it carries the app's write
+    /// grant on the document over to the returned uri, which may be a files-table one. Blocking.
+    /// </summary>
+    private static AndroidUri? MediaUriOf(AndroidUri document)
+    {
+        try
+        {
+            return MediaStore.GetMediaUri(Application.Context, document);
+        }
+        catch (Java.Lang.Exception)
+        {
+            return null; // not indexed (yet), or the provider can't say
+        }
+    }
+
+    private static void TryDeleteDocument(AndroidUri? document)
+    {
+        if (document is null)
+            return;
+        try
+        {
+            DocumentsContract.DeleteDocument(Resolver, document);
+        }
+        catch
+        {
+            // best effort
+        }
+    }
+
+    /// <summary>
+    /// Puts the ⭐ back on a copy made through a folder grant (Android 11+). The copy belongs to
+    /// the system's storage provider, not to this app, so MediaStore refuses a plain update.
+    /// <paramref name="media"/> comes from <see cref="MediaUriOf"/>, which carried the app's
+    /// write grant on the document over to it, so the app can set the flag without asking.
+    /// Only if a device still refuses does the system's favourite request run, once. Nothing
+    /// here may throw: the copy is made, and only the ⭐ would be lost.
+    /// </summary>
+    private static async Task KeepFavoriteAsync(AndroidUri media, MediaKind kind)
+    {
+        if (!OperatingSystem.IsAndroidVersionAtLeast(30))
+            return; // no favourites before Android 11
+
+        try
+        {
+            var values = new ContentValues();
+            values.Put(ColIsFavorite, 1);
+            if (await Task.Run(() => Resolver.Update(media, values, null, null)) > 0)
+                return;
+        }
+        catch (Java.Lang.Exception)
+        {
+            // refused — fall through to asking
+        }
+
+        try
+        {
+            // Requests take typed media uris only ("All requested items must be Media items").
+            var typed = ContentUris.WithAppendedId(TypedCollectionFor(kind), ContentUris.ParseId(media));
+            var pending = MediaStore.CreateFavoriteRequest(Resolver, new List<AndroidUri> { typed }, true);
+            await IntentSenderLauncher.LaunchAsync(pending.IntentSender);
+        }
+        catch
+        {
+            // the copy stands; only the ⭐ is lost
         }
     }
 
