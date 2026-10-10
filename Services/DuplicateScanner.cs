@@ -34,6 +34,9 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
     /// <summary>Fingerprints are flushed this often so a cancelled scan keeps its progress.</summary>
     private const int SaveBatch = 200;
 
+    /// <summary>The stage a scan reports when it found nothing to read, or nothing that could be.</summary>
+    private const string UpToDate = "Up to date";
+
     public async Task<IReadOnlyList<ScannedPhoto>> ScanAsync(
         IReadOnlyList<PhotoAsset> photos,
         IProgress<ScanProgress>? progress = null,
@@ -41,6 +44,20 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
     {
         var cached = await store.GetSignaturesAsync();
         var contentHashes = await store.GetContentHashesAsync();
+
+        // Only Android ever hands over other than a file's own bytes, so anywhere else a hash
+        // cached before rows said which is taken at its word.
+        if (!OperatingSystem.IsAndroid())
+        {
+            foreach (var row in contentHashes.Values)
+                row.Original = true;
+        }
+
+        // Whether the files can be read as they are now (on Android only with
+        // ACCESS_MEDIA_LOCATION). While they can't, nothing is hashed: a hash of a file handed over
+        // with its location blanked would call two files identical that differ in where they were
+        // taken. What was hashed of the originals before still counts.
+        bool readsOriginals = await library.ReadsOriginalBytesAsync();
 
         var stills = photos.Where(p => p.Kind == MediaKind.Image).ToList();
         var samplable = VideosWorthSampling(photos.Where(p => p.Kind == MediaKind.Video));
@@ -81,9 +98,11 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             }
         }
 
-        // Hashes cached before files carried a stamp. One that could make an identical pair is
-        // read again, as its file may have been rotated since; dropped here, it is hashed below
-        // and doesn't count if that fails. The rest keep their value and take the file's stamp.
+        // Hashes cached before files carried a stamp, or before rows said they were of the file's
+        // own bytes. One that could make an identical pair is read again, as its file may have
+        // been rotated since, or read with its location blanked; dropped here, it is hashed below
+        // and doesn't count if that fails, or while the originals can't be read. Of the rest, the
+        // ones only missing a stamp keep their value and take the file's.
         var adoption = HashAdoption.For(sizeCollisions, contentHashes);
         foreach (var photo in adoption.Reread)
             contentHashes.Remove(photo.Id);
@@ -97,16 +116,21 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             // only an optimisation: the rows stay unstamped, and are adopted again next scan
         }
 
-        var toHash = sizeCollisions
-            .Where(p => !(contentHashes.TryGetValue(p.Id, out var row) && row.IsCurrentFor(p)))
-            .ToList();
+        var toHash = readsOriginals
+            ? sizeCollisions
+                .Where(p => !(contentHashes.TryGetValue(p.Id, out var row) && row.IsCurrentFor(p)))
+                .ToList()
+            : new List<PhotoAsset>();
 
         int total = stillsToRead.Count + framesToRead + toHash.Count;
         int done = 0;
 
+        // How many of them gave something to keep: a fingerprint, a frame's, a file's hash.
+        int read = 0;
+
         if (total == 0)
         {
-            progress?.Report(new ScanProgress("Up to date", 1, 1));
+            progress?.Report(new ScanProgress(UpToDate, 1, 1));
             return Assemble(photos, signatures, frames, contentHashes);
         }
 
@@ -123,6 +147,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
                     signatures[photo.Id] = signature;
                     pending.Add(SignatureRecord.From(photo.Id, 0, photo, signature));
                 }
+                Interlocked.Increment(ref read);
             }
             await AdvanceAsync("Fingerprinting photos");
         });
@@ -143,6 +168,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
                     signature = SignatureBuilder.Build(pixels);
                     lock (signatures)
                         pending.Add(SignatureRecord.From(video.Id, frame, video, signature));
+                    Interlocked.Increment(ref read);
                 }
 
                 await AdvanceAsync("Sampling videos");
@@ -168,6 +194,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
                     freshHashes.Add(record);
                     contentHashes[photo.Id] = record;
                 }
+                Interlocked.Increment(ref read);
             }
             await AdvanceAsync("Checking for identical files");
         });
@@ -186,6 +213,13 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
 
         ct.ThrowIfCancellationRequested();
         await store.ForgetMissingAsync(photos.Select(p => p.Id).ToHashSet(StringComparer.Ordinal));
+
+        // Nothing gave anything: all that was left to read is what can't be read (a photo Android
+        // makes no thumbnail for, a clip with a damaged frame). Those are tried again on every
+        // scan, as the next try may work, so such a library never had nothing to read, and never
+        // said it was up to date. It is: the cache holds all there is to hold.
+        if (Volatile.Read(ref read) == 0)
+            progress?.Report(new ScanProgress(UpToDate, 1, 1));
 
         return Assemble(photos, signatures, frames, contentHashes);
 
@@ -274,10 +308,11 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
 
             // A hash from a different file length describes a file that has since changed, and an
             // edited item's describes an original it no longer looks like. Its row is kept, so
-            // reverting the edit costs no second read.
+            // reverting the edit costs no second read. One not known to be of the file's own bytes
+            // proves nothing either.
             ContentHash = !photo.IsEdited
                 && contentHashes.TryGetValue(photo.Id, out var row)
-                && row.IsCurrentFor(photo)
+                && row.ProvesIdentityOf(photo)
                 ? row.Hash
                 : null,
         })];

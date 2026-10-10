@@ -44,6 +44,14 @@ public sealed class ReviewStore
         return await _db.Table<ReviewRecord>().ToListAsync();
     }
 
+    /// <summary>The decision about one photo, or null when it has none.</summary>
+    public async Task<ReviewRecord?> FindAsync(string photoId)
+    {
+        await InitAsync();
+        var found = await _db.QueryAsync<ReviewRecord>("SELECT * FROM reviews WHERE PhotoId = ?", photoId);
+        return found.Count > 0 ? found[0] : null;
+    }
+
     // Raw SQL on purpose: sqlite-net's LINQ-to-SQL translation of "enum == constant &&
     // nullable == null" breaks silently under Release AOT on Android (returns no rows).
 
@@ -76,6 +84,17 @@ public sealed class ReviewStore
     {
         await InitAsync();
         await _db.DeleteAsync<ReviewRecord>(photoId);
+    }
+
+    /// <summary>Removes several decisions in one go, or none of them.</summary>
+    public async Task RemoveAllAsync(IReadOnlyCollection<string> photoIds)
+    {
+        await InitAsync();
+        await _db.RunInTransactionAsync(conn =>
+        {
+            foreach (var id in photoIds)
+                conn.Execute("DELETE FROM reviews WHERE PhotoId = ?", id);
+        });
     }
 
     /// <summary>

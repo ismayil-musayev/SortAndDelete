@@ -219,4 +219,40 @@ public class SignatureRecordTests
         Assert.False(restamped.NeedsStampFrom(file));
         Assert.False(restamped.IsCurrentFor(Photo(fileModifiedAt: Rotated)));
     }
+
+    /// <summary>
+    /// A hash taken now is of the file's own bytes, and says so. One cached before rows said so
+    /// may be of a file Android handed over with its location blanked: it is still current, as
+    /// the file hasn't changed, but it can't make the file an identical file of anything.
+    /// </summary>
+    [Fact]
+    public void Only_a_hash_known_to_be_of_the_files_own_bytes_proves_identity()
+    {
+        var file = Photo(fileModifiedAt: Written);
+        var taken = ContentHashRecord.From(file, "ABC");
+        var cachedBefore = new ContentHashRecord
+        {
+            PhotoId = file.Id,
+            SizeBytes = file.SizeBytes,
+            FileModifiedAtTicks = file.FileModifiedAt.Ticks,
+            Hash = "ABC",
+        };
+
+        Assert.True(taken.Original);
+        Assert.True(taken.ProvesIdentityOf(file));
+
+        Assert.False(cachedBefore.Original);
+        Assert.True(cachedBefore.IsCurrentFor(file));
+        Assert.False(cachedBefore.ProvesIdentityOf(file));
+    }
+
+    /// <summary>A hash of the original proves nothing about the file once the file has changed.</summary>
+    [Fact]
+    public void A_hash_of_the_original_stops_proving_identity_when_the_file_is_rewritten()
+    {
+        var record = ContentHashRecord.From(Photo(fileModifiedAt: Written), "ABC");
+
+        Assert.False(record.ProvesIdentityOf(Photo(fileModifiedAt: Rotated)));
+        Assert.False(record.ProvesIdentityOf(Photo(size: 4_000_000, fileModifiedAt: Written)));
+    }
 }

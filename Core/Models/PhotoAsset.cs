@@ -70,6 +70,12 @@ public sealed class PhotoAsset
     /// <summary>Folder path like "Pictures/Travel/" (Android). Empty on iOS — photos live in albums, not folders.</summary>
     public string FolderPath { get; init; } = "";
 
+    /// <summary>
+    /// The storage volume the item is on, as MediaStore names it (Android): "external_primary" for
+    /// internal storage, an SD card's "1a2b-3c4d". Empty on iOS, and where it isn't known.
+    /// </summary>
+    public string VolumeName { get; init; } = "";
+
     /// <summary>Key used to group items by month, e.g. "2026-07".</summary>
     public string MonthKey => TakenAt.ToString("yyyy-MM");
 

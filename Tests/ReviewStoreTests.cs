@@ -178,4 +178,91 @@ public sealed class ReviewStoreTests : IAsyncLifetime
 
         Assert.Empty(await _store.GetAllAsync());
     }
+
+    [Fact]
+    public async Task A_bin_decision_keeps_the_volume_the_photo_was_on()
+    {
+        var onCard = Trash("card", 100);
+        onCard.VolumeName = "1103-3d09";
+        await _store.UpsertAsync(onCard);
+        await _store.UpsertAsync(Trash("unknown", 50));
+
+        var pending = (await _store.GetPendingTrashAsync()).ToDictionary(r => r.PhotoId);
+        Assert.Equal("1103-3d09", pending["card"].VolumeName);
+        Assert.Null(pending["unknown"].VolumeName);
+
+        await _store.MarkCommittedAsync(["card"]);
+        var committed = Assert.Single(await _store.GetCommittedTrashSinceAsync(DateTime.UtcNow.AddDays(-1)));
+        Assert.Equal("1103-3d09", committed.VolumeName);
+    }
+
+    /// <summary>
+    /// The reviews of an installed version have no volume column. Opening them adds it, empty,
+    /// and loses nothing: these are the user's decisions, bin included.
+    /// </summary>
+    [Fact]
+    public async Task A_database_from_before_volumes_were_kept_opens_with_its_decisions()
+    {
+        // The table as versions 1.0 to 3.0 created it.
+        var old = new SQLiteConnection(_dbPath);
+        old.Execute("""
+            CREATE TABLE "reviews"(
+                "PhotoId" varchar primary key not null,
+                "MonthKey" varchar,
+                "Decision" integer,
+                "DecidedAt" bigint,
+                "CommittedAt" bigint,
+                "SizeBytes" bigint,
+                "TargetAlbum" varchar)
+            """);
+        old.Execute("CREATE INDEX \"reviews_MonthKey\" ON \"reviews\"(\"MonthKey\")");
+        var decidedAt = new DateTime(2026, 9, 1, 12, 0, 0, DateTimeKind.Utc);
+        old.Execute("INSERT INTO reviews VALUES (?, ?, ?, ?, NULL, ?, NULL)",
+            "binned", "2026-07", (int)SwipeDecision.Trash, decidedAt.Ticks, 4321L);
+        old.Execute("INSERT INTO reviews VALUES (?, ?, ?, ?, ?, ?, NULL)",
+            "emptied", "2026-07", (int)SwipeDecision.Trash, decidedAt.Ticks, decidedAt.Ticks, 1000L);
+        old.Execute("INSERT INTO reviews VALUES (?, ?, ?, ?, NULL, 0, ?)",
+            "moved", "2026-06", (int)SwipeDecision.Moved, decidedAt.Ticks, "Trips");
+        old.Close();
+
+        var all = (await _store.GetAllAsync()).ToDictionary(r => r.PhotoId);
+        Assert.Equal(["binned", "emptied", "moved"], all.Keys.Order());
+        Assert.All(all.Values, record => Assert.Null(record.VolumeName));
+        Assert.Equal(4321, all["binned"].SizeBytes);
+        Assert.Equal(decidedAt, all["binned"].DecidedAt);
+        Assert.Equal(decidedAt, all["emptied"].CommittedAt);
+        Assert.Equal("Trips", all["moved"].TargetAlbum);
+        Assert.Equal("binned", Assert.Single(await _store.GetPendingTrashAsync()).PhotoId);
+        Assert.Equal(1000, await _store.GetFreedBytesAsync());
+
+        var onCard = Trash("card");
+        onCard.VolumeName = "1103-3d09";
+        await _store.UpsertAsync(onCard);
+        Assert.Equal("1103-3d09", (await _store.GetAllAsync()).Single(r => r.PhotoId == "card").VolumeName);
+    }
+
+    [Fact]
+    public async Task One_decision_can_be_looked_up_as_it_stands()
+    {
+        await _store.UpsertAsync(Trash("binned", 10));
+        await _store.UpsertAsync(Trash("emptied", 20));
+        await _store.MarkCommittedAsync(["emptied"]);
+
+        Assert.Null((await _store.FindAsync("binned"))!.CommittedAt);
+        Assert.NotNull((await _store.FindAsync("emptied"))!.CommittedAt);
+        Assert.Equal(SwipeDecision.Trash, (await _store.FindAsync("emptied"))!.Decision);
+        Assert.Null(await _store.FindAsync("never-decided"));
+    }
+
+    [Fact]
+    public async Task Forgetting_several_decisions_leaves_the_others()
+    {
+        await _store.UpsertAsync(Trash("a"));
+        await _store.UpsertAsync(Trash("b"));
+        await _store.UpsertAsync(Trash("c"));
+
+        await _store.RemoveAllAsync(["a", "c", "never-there"]);
+
+        Assert.Equal("b", Assert.Single(await _store.GetAllAsync()).PhotoId);
+    }
 }

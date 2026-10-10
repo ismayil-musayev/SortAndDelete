@@ -132,6 +132,11 @@ public class StorageDocumentsTests
     [InlineData("primary:", "primary:")]
     [InlineData("not-a-document-id", "primary:DCIM/IMG_1.jpg")]
     [InlineData("primary:DCIM", "not-a-document-id")]
+    // a path that steps out of a folder
+    [InlineData("primary:DCIM", "primary:DCIM/../Pictures/IMG_1.jpg")]
+    [InlineData("primary:DCIM", "primary:DCIM/./IMG_1.jpg")]
+    [InlineData("home:", "primary:Documents/../DCIM/IMG_1.jpg")]
+    [InlineData("primary:", "primary:../IMG_1.jpg")]
     public void A_grant_does_not_cover_documents_elsewhere(string tree, string document) =>
         Assert.Null(StorageDocuments.DocumentIdInGrant(tree, document));
 
@@ -147,5 +152,54 @@ public class StorageDocumentsTests
         var folder = StorageDocuments.FolderToGrant(document)!;
 
         Assert.Equal(document, StorageDocuments.DocumentIdInGrant(folder, document));
+    }
+
+    // Android 10: asked for "primary:Documents", the folder picker opens on Documents and answers
+    // with the provider's Documents root, "home:", or "home:Scans" for a folder inside it.
+
+    [Theory]
+    [InlineData("home:", "primary:Documents/B29A5/b29_a5_item.jpg", "home:B29A5/b29_a5_item.jpg")]
+    [InlineData("home:", "primary:Documents/IMG_1.jpg", "home:IMG_1.jpg")]
+    [InlineData("home:B29A5", "primary:Documents/B29A5/b29_a5_item.jpg", "home:B29A5/b29_a5_item.jpg")]
+    [InlineData("home:B29A5", "primary:Documents/B29A5/2024/IMG_1.jpg", "home:B29A5/2024/IMG_1.jpg")]
+    // spelled differently: what the grant covers in the grant's spelling, the rest in the file's
+    [InlineData("home:", "primary:documents/Scans/IMG_1.jpg", "home:Scans/IMG_1.jpg")]
+    [InlineData("home:scans", "primary:Documents/Scans/IMG_1.jpg", "home:scans/IMG_1.jpg")]
+    [InlineData("home:", "PRIMARY:Documents/IMG_1.jpg", "home:IMG_1.jpg")]
+    // a file named in the Documents root itself, under either kind of grant
+    [InlineData("home:Scans", "home:Scans/IMG_1.jpg", "home:Scans/IMG_1.jpg")]
+    [InlineData("primary:", "home:Scans/IMG_1.jpg", "primary:Documents/Scans/IMG_1.jpg")]
+    [InlineData("primary:Documents", "home:Scans/IMG_1.jpg", "primary:Documents/Scans/IMG_1.jpg")]
+    public void A_grant_of_the_Documents_root_covers_the_files_in_Documents(string tree, string document, string expected) =>
+        Assert.Equal(expected, StorageDocuments.DocumentIdInGrant(tree, document));
+
+    [Theory]
+    // not the top of the storage: nothing outside Documents
+    [InlineData("home:", "primary:DCIM/IMG_1.jpg")]
+    [InlineData("home:", "primary:IMG_1.jpg")]
+    [InlineData("home:", "primary:Documents2/IMG_1.jpg")]
+    // an SD card has no Documents root: its Documents folder is "1103-3D09:Documents"
+    [InlineData("home:", "1103-3D09:Documents/IMG_1.jpg")]
+    // another folder inside Documents (the "wrong folder" a user can pick), or one inside the file's
+    [InlineData("home:B29Sub", "primary:Documents/B29A5/b29_a5_item.jpg")]
+    [InlineData("home:B29A5/2024", "primary:Documents/B29A5/b29_a5_item.jpg")]
+    [InlineData("home:B29", "primary:Documents/B29A5/b29_a5_item.jpg")]
+    // no file inside it
+    [InlineData("home:", "primary:Documents")]
+    [InlineData("home:", "home:")]
+    public void A_grant_of_the_Documents_root_covers_nothing_else(string tree, string document) =>
+        Assert.Null(StorageDocuments.DocumentIdInGrant(tree, document));
+
+    [Theory]
+    [InlineData("/storage/emulated/0/Documents/B29A5/b29_a5_item.jpg", "home:")]
+    [InlineData("/storage/emulated/0/Documents/B29A5/b29_a5_item.jpg", "home:B29A5")]
+    [InlineData("/sdcard/Documents/IMG_1.jpg", "home:")]
+    public void What_Android_10_grants_for_Documents_covers_the_file_it_was_asked_for(string path, string granted)
+    {
+        var document = StorageDocuments.DocumentIdOfPath(path, InternalStorage)!;
+
+        // The folder asked for is still "primary:Documents": the picker opens on Documents from it.
+        Assert.Equal("primary:Documents", StorageDocuments.FolderToGrant(document));
+        Assert.StartsWith("home:", StorageDocuments.DocumentIdInGrant(granted, document));
     }
 }

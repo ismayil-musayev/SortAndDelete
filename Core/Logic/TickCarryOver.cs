@@ -29,8 +29,9 @@ public sealed record GroupTicks(string KeeperId, IReadOnlyList<ItemTick> Items);
 ///
 /// <list type="bullet">
 /// <item>a tick is carried over when its group came back as it was, with the same members and
-/// the same one to keep, and its own photo hasn't changed. What the user ticked was that picture
-/// among those copies;</item>
+/// the same one to keep, and neither its own photo nor the one to keep has changed. What was
+/// ticked was that picture among those copies, to go while that one stays: with the keeper
+/// edited meanwhile, the copy ticked beside it may be the only clean one left;</item>
 /// <item>an item left unticked stays unticked for as long as its group has the same keeper,
 /// whoever has joined or left the group and whatever has become of the photo. Unticked is the
 /// safe side, and a level that ticks by itself would otherwise tick it again on every rescan;</item>
@@ -62,6 +63,7 @@ public static class TickCarryOver
                 was.TryGetValue(group.Keeper.Id, out var keeper)
                 && keeper.Group.KeeperId == group.Keeper.Id
                 && keeper.Group.Items.Count == group.Items.Count
+                && keeper.Item.Version == PhotoVersion.Of(group.Keeper)
                 && group.Items.All(photo =>
                     was.TryGetValue(photo.Id, out var member) && ReferenceEquals(member.Group, keeper.Group));
 
@@ -90,8 +92,11 @@ public static class TickCarryOver
     /// <summary>
     /// Only the levels we can stand behind arrive with anything ticked. The looser ones surface
     /// the group and leave every choice to the user. An edited item never does: ranking can't
-    /// tell it from its original, so which of the two would go comes down to their ids.
+    /// tell it from its original, so which of the two would go comes down to their ids. Nor does
+    /// one that only looks like another of its own size
+    /// (<see cref="DuplicateGroup.SameSizeLookalikes"/>): that much a different picture can do.
     /// </summary>
     private static bool TickedByDefault(DuplicateGroup group, PhotoAsset photo, bool preselect) =>
-        preselect && photo.Id != group.Keeper.Id && !photo.IsEdited;
+        preselect && photo.Id != group.Keeper.Id && !photo.IsEdited
+        && !group.SameSizeLookalikes.Contains(photo.Id);
 }

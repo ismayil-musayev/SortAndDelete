@@ -131,7 +131,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
 
             int total = groups.Sum(g => g.TotalCount);
             int reviewed = groups.Sum(g => g.ReviewedCount);
-            TotalPhotosText = $"{total:N0} items";
+            TotalPhotosText = $"{total:N0} item{(total == 1 ? "" : "s")}";
             ReviewedText = total == 0 ? "0% reviewed" : $"{(int)Math.Round(100.0 * reviewed / total)}% reviewed";
 
             // Streak
@@ -205,14 +205,16 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     /// <summary>
     /// Loads the page again after the library changed outside it, in another app or while the app
     /// was in the background: as <see cref="ReloadAsync"/> does, but only when the load in progress,
-    /// or else the latest one, found photo access. A load asks for access when there is none, and
+    /// or else the latest one, found photo access, or there is access now all the same: the user
+    /// gave it in the system settings and came back. A load asks for access when there is none, and
     /// a reload the user didn't ask for must not: after "Don't allow", a second "Don't allow" is
-    /// for good.
+    /// for good. So without access from a load this only looks, which asks nothing, and loads when
+    /// the load's own request will find the access there.
     /// </summary>
     public async Task ReloadAfterLibraryChangeAsync()
     {
         await _loadEnded;
-        if (!_accessGranted)
+        if (!_accessGranted && !await gallery.Library.HasAccessAsync())
             return;
         await LoadAsync();
     }
@@ -331,9 +333,13 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         if (selected.Count == 0)
             return;
 
+        // Android 10 has no system trash to speak of.
+        string untouched = gallery.Library.SupportsSystemTrash
+            ? "Photos in the bin and the system trash are not touched."
+            : "Photos in the bin are not touched.";
         bool confirmed = await Shell.Current.DisplayAlertAsync("Re-review months",
             $"Review {selected.Count} month{(selected.Count == 1 ? "" : "s")} again from the start? " +
-            "Your keep decisions there are forgotten. Photos in the bin and the system trash are not touched.",
+            $"Your keep decisions there are forgotten. {untouched}",
             "Re-review", "Cancel");
         if (!confirmed)
             return;

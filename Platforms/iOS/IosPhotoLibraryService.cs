@@ -29,6 +29,14 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
         return status is PHAuthorizationStatus.Authorized or PHAuthorizationStatus.Limited;
     }
 
+    // Reading the status asks nothing; only RequestAuthorizationAsync shows the system dialog.
+    public Task<bool> HasAccessAsync() =>
+        Task.FromResult(PHPhotoLibrary.GetAuthorizationStatus(PHAccessLevel.ReadWrite)
+            is PHAuthorizationStatus.Authorized or PHAuthorizationStatus.Limited);
+
+    // Photos hands over an asset's original resource as it is, location and all.
+    public Task<bool> ReadsOriginalBytesAsync() => Task.FromResult(true);
+
     /// <summary>iOS manages a limited selection in its own UI; the app doesn't offer it here.</summary>
     public Task<bool> HasLimitedAccessAsync() => Task.FromResult(false);
 
@@ -473,7 +481,8 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
     }
 
     /// <summary>Not possible on iOS — Recently Deleted is only accessible to the Photos app.</summary>
-    public Task<bool> RestoreFromSystemTrashAsync(IReadOnlyList<string> photoIds) => Task.FromResult(false);
+    public Task<RestoreOutcome> RestoreFromSystemTrashAsync(string photoId, string? knownVolume) =>
+        Task.FromResult(RestoreOutcome.NotRestored);
 
     public Task<IReadOnlyCollection<string>> GetAlbumMemberIdsAsync(string folderId) =>
         Task.Run<IReadOnlyCollection<string>>(() =>
@@ -511,21 +520,27 @@ public sealed class IosPhotoLibraryService : IPhotoLibraryService
         return 0L;
     });
 
-    public async Task<bool> MoveToSystemTrashAsync(IReadOnlyList<string> photoIds)
+    /// <summary>
+    /// The Photos library answers for the whole batch, so the result is all or nothing here, as it
+    /// always was: every item removed once the user confirms, none when they don't. Volumes are
+    /// Android's; iOS has none to tell apart.
+    /// </summary>
+    public async Task<TrashResult> MoveToSystemTrashAsync(
+        IReadOnlyList<string> photoIds, IReadOnlyDictionary<string, string> knownVolumes)
     {
         if (photoIds.Count == 0)
-            return true;
+            return TrashResult.Nothing;
 
         var assets = FetchAssets(photoIds);
         if (assets.Length == 0)
-            return true;
+            return TrashResult.AllRemoved(photoIds);
 
         // One system confirmation dialog for the whole batch; assets land in "Recently Deleted".
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         PHPhotoLibrary.SharedPhotoLibrary.PerformChanges(
             () => PHAssetChangeRequest.DeleteAssets(assets),
             (success, _) => tcs.TrySetResult(success));
-        return await tcs.Task;
+        return await tcs.Task ? TrashResult.AllRemoved(photoIds) : TrashResult.AllLeft(photoIds);
     }
 
     public Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync() => Task.Run<IReadOnlyList<AlbumInfo>>(() =>

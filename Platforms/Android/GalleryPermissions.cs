@@ -27,7 +27,8 @@ public sealed class PartialGalleryPermission : Permissions.BasePlatformPermissio
 
 /// <summary>
 /// ACCESS_MEDIA_LOCATION: without it Android blanks the location in every photo or video the
-/// app reads but didn't create, so a move that copies the file would lose where it was taken.
+/// app reads but didn't create, so a move that copies the file would lose where it was taken,
+/// and two files that differ only in where they were taken would hash as identical files.
 /// Kept apart from <see cref="GalleryPermission"/>: missing it must not make the library look
 /// inaccessible.
 /// </summary>
@@ -35,4 +36,16 @@ public sealed class MediaLocationPermission : Permissions.BasePlatformPermission
 {
     public override (string androidPermission, bool isRuntime)[] RequiredPermissions =>
         [(global::Android.Manifest.Permission.AccessMediaLocation, true)];
+}
+
+/// <summary>
+/// The gallery permissions and ACCESS_MEDIA_LOCATION in one request, for the first time the app
+/// asks: they are one permission group, so Android shows the dialog it shows for the gallery
+/// alone, and "Allow" grants the location with it. Only for asking. Whether the library is usable
+/// is still <see cref="GalleryPermission"/>'s to say, and <see cref="PartialGalleryPermission"/>'s.
+/// </summary>
+public sealed class GalleryWithLocationPermission : Permissions.BasePlatformPermission
+{
+    public override (string androidPermission, bool isRuntime)[] RequiredPermissions =>
+        [.. new GalleryPermission().RequiredPermissions, .. new MediaLocationPermission().RequiredPermissions];
 }

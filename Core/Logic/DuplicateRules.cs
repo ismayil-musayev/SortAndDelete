@@ -47,6 +47,8 @@ public sealed record DuplicateRules
     /// <summary>
     /// Whether the UI may preselect everything except the keeper. Only the levels we can
     /// stand behind do this; the looser ones surface groups and leave the choosing to the user.
+    /// Within such a level a copy that only looks like another of its own pixel size is still
+    /// left to the user (<see cref="DuplicateGroup.SameSizeLookalikes"/>).
     /// </summary>
     public required bool PreselectsKeeper { get; init; }
 

@@ -113,12 +113,28 @@ public sealed class ContentHashRecord
 
     public string Hash { get; set; } = "";
 
+    /// <summary>
+    /// Whether the hash is known to be of the file's own bytes, every one of them. Android hands
+    /// an app the photos and videos it didn't create with where they were taken blanked out,
+    /// unless the app holds ACCESS_MEDIA_LOCATION and asks for the original; hashed like that, two
+    /// files that differ only in their location look identical. A row hashed before this column
+    /// existed reads back false, as nothing says how it was read. Such a row proves nothing
+    /// (<see cref="ProvesIdentityOf"/>), and only a hash of the original replaces it
+    /// (<see cref="Logic.HashAdoption"/>).
+    /// </summary>
+    public bool Original { get; set; }
+
+    /// <summary>
+    /// The row for a hash just taken of <paramref name="photo"/>'s own bytes, or for one known to
+    /// be of them that takes the file's stamp.
+    /// </summary>
     public static ContentHashRecord From(PhotoAsset photo, string hash) => new()
     {
         PhotoId = photo.Id,
         SizeBytes = photo.SizeBytes,
         FileModifiedAtTicks = photo.FileModifiedAt.Ticks,
         Hash = hash,
+        Original = true,
     };
 
     /// <summary>
@@ -138,6 +154,13 @@ public sealed class ContentHashRecord
     public bool IsCurrentFor(PhotoAsset photo) =>
         SizeBytes == photo.SizeBytes
         && (FileModifiedAtTicks == 0 || FileModifiedAtTicks == photo.FileModifiedAt.Ticks);
+
+    /// <summary>
+    /// Whether this hash can make <paramref name="photo"/> an identical file of another: it still
+    /// describes the file, and it is of the file's own bytes. Two files are identical only when
+    /// each has such a hash and the two are equal.
+    /// </summary>
+    public bool ProvesIdentityOf(PhotoAsset photo) => Original && IsCurrentFor(photo);
 
     /// <summary>
     /// Whether this row is current but unstamped while the item has a stamp to give it. Saved again

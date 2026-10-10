@@ -19,6 +19,9 @@ public partial class DuplicateItem : ObservableObject
     public required string LocationText { get; init; }
     public long SizeBytes { get; init; }
 
+    /// <summary>The storage volume the copy is on (<see cref="PhotoAsset.VolumeName"/>), kept with its bin decision.</summary>
+    public string VolumeName { get; init; } = "";
+
     /// <summary>The copy the app suggests keeping. Still togglable — this is a suggestion.</summary>
     public bool IsKeeper { get; init; }
 
@@ -75,6 +78,12 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
 
     /// <summary>Lets one load run at a time.</summary>
     private readonly LoadGate _loads = new();
+
+    /// <summary>
+    /// Whether files can be compared byte for byte now (see <see cref="IPhotoLibraryService.ReadsOriginalBytesAsync"/>).
+    /// While they can't, "Identical files" finds nothing new, and its hint says why.
+    /// </summary>
+    private bool _readsOriginals = true;
 
     /// <summary>The visit the page is on now, which ↻ scans under.</summary>
     private CancellationToken _visit;
@@ -167,6 +176,9 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
 
             if (fromScratch)
                 await scanner.ResetAsync();
+
+            _readsOriginals = await gallery.Library.ReadsOriginalBytesAsync();
+            LevelHint = HintFor(_level);
 
             var photos = await gallery.GetPhotosAsync();
             var binned = await GetBinnedAsync();
@@ -361,6 +373,7 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
                 SizeText = photo.SizeBytes > 0 ? ByteFormat.Human(photo.SizeBytes) : "",
                 LocationText = photo.LocationText,
                 SizeBytes = photo.SizeBytes,
+                VolumeName = photo.VolumeName,
                 IsKeeper = isKeeper,
                 IsEdited = photo.IsEdited,
                 Version = tick.Version,
@@ -384,12 +397,18 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
         return card;
     }
 
-    private static string HintFor(DuplicateLevel level) => level switch
+    private string HintFor(DuplicateLevel level) => level switch
     {
+        // Android hands over other apps' photos with their location blanked unless the app has
+        // access to all photos, and files compared like that could differ in just that.
+        DuplicateLevel.Exact when !_readsOriginals =>
+            "Byte-for-byte identical files. Sort & Delete can only compare files byte for byte with access to " +
+            "all your photos, so nothing new is found here for now. Look under Same photo instead.",
         DuplicateLevel.Exact =>
             "Byte-for-byte identical files. Nothing here is a judgement call.",
         DuplicateLevel.SamePhoto =>
-            "The same picture, re-encoded — what WhatsApp, Bluetooth or email does to a photo. Identical files are included too.",
+            "The same picture, re-encoded — what WhatsApp, Bluetooth or email does to a photo. Identical files are included too. " +
+            "Look-alikes of the very same size are left unticked: check those yourself, they can be different pictures.",
         DuplicateLevel.Adjusted =>
             "The same picture with a filter, an exposure tweak or a quarter turn. Worth a look before you delete.",
         DuplicateLevel.SameMoment =>
@@ -504,6 +523,10 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
                         Decision = SwipeDecision.Trash,
                         DecidedAt = DateTime.UtcNow,
                         SizeBytes = item.SizeBytes,
+
+                        // Where it is, for emptying the bin: a copy on an SD card that has been
+                        // taken out by then is not in the library, and must not be taken for deleted.
+                        VolumeName = item.VolumeName.Length > 0 ? item.VolumeName : null,
                     });
                     binned.Add(item.PhotoId);
                 }

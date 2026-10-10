@@ -5,6 +5,27 @@ using SortAndDelete.Services;
 
 namespace SortAndDelete.ViewModels;
 
+/// <summary>
+/// The deck page's card, as the view model drives it. The page puts a picture on the card in the
+/// call that asks for it, which is the same step the view model sets the card's label in, so the
+/// two reach the screen in one frame.
+/// </summary>
+public interface IDeckCardView
+{
+    /// <summary>
+    /// Puts <paramref name="picture"/> (null: this photo has none to show) on the front card and
+    /// brings the card up, at rest. Once a frame with it has been drawn, the view calls
+    /// <see cref="SwipeViewModel.OnCardDrawn"/> for <paramref name="photoId"/>.
+    /// </summary>
+    void ShowCard(string photoId, CardPicture? picture);
+
+    /// <summary>Takes the front card off the screen.</summary>
+    void HideCard();
+
+    /// <summary>Puts the picture of the photo behind the front card on the back card; null clears it.</summary>
+    void ShowBackCard(CardPicture? picture);
+}
+
 [QueryProperty(nameof(MonthKey), "month")]
 [QueryProperty(nameof(ModeName), "mode")]
 [QueryProperty(nameof(FolderId), "folder")]
@@ -12,10 +33,36 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
 {
     private const int CardPixelSize = 2048;
 
+    /// <summary>
+    /// How long a card must have been up before a press can be about it (see <see cref="ShownCard"/>):
+    /// well under the time anyone takes to react to a picture, let alone judge one, so it only
+    /// ever refuses a press that was on its way before the card appeared.
+    /// </summary>
+    private const long MinimumLookMs = 150;
+
     private List<PhotoAsset> _queue = [];
     private readonly Stack<Step> _history = new();
     private int _total;
     private bool _initialized;
+    private bool _initializing;
+
+    // The card. The deck's front is the photo that belongs on it; the photo that is on it, picture
+    // and label, is _shown: the front, or none while the front's picture is being decoded. What a
+    // press decides goes by the card alone (see ShownCard).
+    private readonly ShownCard _card = new(MinimumLookMs);
+    private PhotoAsset? _shown;
+    private IDeckCardView? _view;
+
+    // Counts the deals of the deck, so a picture that took its time finds out whether the deck it
+    // was decoded for is still the one on the table.
+    private int _deal;
+
+    // The decoded pictures of the cards about to be shown (see DeckCard.PicturesToKeep), by photo
+    // id, each with the photo as it was when its picture was decoded.
+    private readonly Dictionary<string, (PhotoAsset Of, Task<CardPicture?> Decoding)> _pictures = new(StringComparer.Ordinal);
+
+    // The photo whose picture is on the back card.
+    private string? _behind;
 
     /// <summary>
     /// One decision, as Undo needs it. A copy-style move replaced the photo with a new item, the
@@ -35,8 +82,6 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     [ObservableProperty] private string modeName = "";
     [ObservableProperty] private string folderId = "";
     [ObservableProperty] private string title = "";
-    [ObservableProperty] private ImageSource? currentImage;
-    [ObservableProperty] private ImageSource? nextImage;
     [ObservableProperty] private string positionText = "";
     [ObservableProperty] private string currentDateText = "";
     [ObservableProperty] private string currentLocationText = "";
@@ -44,6 +89,7 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     [ObservableProperty] private bool isMonthMode;
     [ObservableProperty] private bool isCurrentVideo;
     [ObservableProperty] private string currentDurationText = "";
+    [ObservableProperty] private bool isPictureMissing;
     [ObservableProperty] private double progress;
     [ObservableProperty] private bool isDone;
     [ObservableProperty] private bool isLoading;
@@ -55,15 +101,56 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     [ObservableProperty] private double copyProgress;
     [ObservableProperty] private string copyText = "";
 
-    public PhotoAsset? CurrentPhoto => _queue.Count > 0 ? _queue[0] : null;
+    /// <summary>The photo that belongs on the card: the front of the deck.</summary>
+    private PhotoAsset? Front => _queue.Count > 0 ? _queue[0] : null;
+
+    /// <summary>
+    /// The photo on the card, picture and label together; null while the card is off, as it is
+    /// while the next photo's picture is being decoded. See <see cref="PhotoDecidedBy"/>.
+    /// </summary>
+    public PhotoAsset? ShownPhoto => _shown;
 
     /// <summary>Whether the ↗ open-in-gallery button is shown (Android only).</summary>
     public bool CanOpenExternally => gallery.Library.SupportsOpenExternally;
 
-    /// <summary>Hands the current item to the default viewer app (or the system chooser).</summary>
+    /// <summary>The page's card, which this drives. Set once, by the page, before it loads the deck.</summary>
+    public void Attach(IDeckCardView view) => _view = view;
+
+    /// <summary>
+    /// The photo a press on one of the deck's buttons decides, by when the press began: the one on
+    /// the card, if its picture had been on screen, with the page in front, long enough by then to
+    /// have been seen (see <see cref="ShownCard"/>). Null when the press decides nothing: no card
+    /// is up, its picture hasn't been drawn, another page was still sliding off it, or the finger
+    /// was already on its way when the card appeared.
+    /// </summary>
+    public PhotoAsset? PhotoDecidedBy(long pressBeganAt) =>
+        _shown is { } shown && _card.DecidedBy(pressBeganAt) == shown.Id && _queue.Any(p => p.Id == shown.Id)
+            ? shown
+            : null;
+
+    /// <summary>
+    /// The page's card has been built, for the first time or anew: the deck's front is put on it
+    /// if it isn't there, as after its pictures were let go of (see <see cref="ReleasePictures"/>).
+    /// </summary>
+    public void OnCardBuilt()
+    {
+        if (_initialized)
+            RefreshCards();
+    }
+
+    /// <summary>A frame showing <paramref name="photoId"/>'s card has been drawn (from the page).</summary>
+    public void OnCardDrawn(string photoId, long at) => _card.Drawn(photoId, at);
+
+    /// <summary>The deck page is in front, and whatever slid off it has gone (from the page).</summary>
+    public void OnPageArrived(long at) => _card.PageArrived(at);
+
+    /// <summary>Another page is in front of the deck (from the page).</summary>
+    public void OnPageLeft() => _card.PageLeft();
+
+    /// <summary>Hands the item on the card to the default viewer app (or the system chooser).</summary>
     public async Task OpenExternallyAsync()
     {
-        var photo = CurrentPhoto;
+        var photo = _shown;
         if (photo is null)
             return;
 
@@ -84,7 +171,8 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
             return;
         }
 
-        IsLoading = true;
+        _initializing = true;
+        UpdateLoading();
         try
         {
             Mode = ModeName.ToLowerInvariant() switch
@@ -108,7 +196,8 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
         }
         finally
         {
-            IsLoading = false;
+            _initializing = false;
+            UpdateLoading();
         }
     }
 
@@ -117,8 +206,6 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     /// <summary>Fresh queue load — used by init and by "Re-review month".</summary>
     private async Task LoadQueueAsync()
     {
-        // The deck is read last, and from there to the cards nothing is awaited: the card on screen
-        // is always the front of the deck, which is the one a tap acts on.
         int? monthTotal = await MonthTotalAsync();
         await RefreshBinBadgeAsync();
         var queue = await gallery.GetQueueAsync(Mode, MonthKey, Folder);
@@ -130,21 +217,20 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     }
 
     /// <summary>
-    /// Re-entry after visiting the bin or album picker: drop photos reviewed elsewhere,
-    /// put restored photos back at the front, keep the rest of the queue order intact.
+    /// Re-entry after visiting the bin or album picker: drop photos reviewed elsewhere, put
+    /// restored photos next in line, keep the rest of the queue order intact.
     /// </summary>
     private async Task ResyncAsync()
     {
-        // Read in the order LoadQueueAsync reads, for the same reason: the deck is dealt and shown
-        // in one go, so a restored photo is never at its front while the old card is still on screen.
-        // The Biggest deck keeps the total fixed from init; RefreshCards clamps if restores grow the queue.
+        // The Biggest deck keeps the total fixed from init; the position is clamped if restores
+        // grow the queue. Restored photos go behind the card that is up, not in its place: the
+        // user comes back to the card they left, and a tap on it must not find another photo
+        // there (see DeckCard.Redeal). With no card up they go to the front.
         int? monthTotal = await MonthTotalAsync();
         await RefreshBinBadgeAsync();
         var fresh = await gallery.GetQueueAsync(Mode, MonthKey, Folder);
 
-        var freshIds = fresh.Select(p => p.Id).ToHashSet();
-        var knownIds = _queue.Select(p => p.Id).ToHashSet();
-        _queue = [.. fresh.Where(p => !knownIds.Contains(p.Id)), .. _queue.Where(p => freshIds.Contains(p.Id))];
+        _queue = DeckCard.Redeal(_queue, fresh, photo => photo.Id, _shown?.Id);
         _total = monthTotal ?? _total;
         RefreshCards();
     }
@@ -180,27 +266,253 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
         BinBadgeText = pending.Count == 0 ? "Bin" : $"Bin · {pending.Count}";
     }
 
+    // ---------- The card ----------
+
+    /// <summary>
+    /// Brings the card in line with the deck after the deck changed. The photo at the front
+    /// belongs on the card, and gets there only together with its picture: the label, the counter
+    /// and the picture change in one step (<see cref="ShowOnCard"/>), once the picture is decoded.
+    /// Until then no card is up: one that shows another photo than the front goes at once (see
+    /// <see cref="DeckCard.After"/>), so there is never a card to press that isn't the front's.
+    /// </summary>
     private void RefreshCards()
     {
-        var current = CurrentPhoto;
-        var next = _queue.Count > 1 ? _queue[1] : null;
-
-        CurrentImage = current is null ? null : gallery.CreateThumbnail(current.Id, CardPixelSize);
-        NextImage = next is null ? null : gallery.CreateThumbnail(next.Id, CardPixelSize);
-
-        IsDone = current is null;
-        int done = Math.Max(0, _total - _queue.Count);
-        PositionText = IsDone ? "" : $"{done + 1} / {_total}";
-        Progress = _total == 0 ? 1 : (double)done / _total;
-        CurrentDateText = current?.TakenAt.ToString("d MMM yyyy · HH:mm") ?? "";
-        CurrentLocationText = current?.LocationText ?? "";
-        CurrentSizeText = current is { SizeBytes: > 0 }
-            ? Helpers.ByteFormat.Human(current.SizeBytes)
-            : "";
-        IsCurrentVideo = current?.Kind == MediaKind.Video;
-        CurrentDurationText = current?.DurationText ?? "";
+        int deal = ++_deal;
         CanUndo = _history.Count > 0;
+        IsDone = _queue.Count == 0;
+
+        var change = DeckCard.After(_shown?.Id, [.. _queue.Take(1).Select(p => p.Id)]);
+        if (change is CardChange.Replace or CardChange.Done)
+            TakeCardOff();
+
+        KeepPictures();
+
+        if (change == CardChange.Done)
+        {
+            PositionText = "";
+            Progress = 1;
+        }
+        else if (change == CardChange.Stay)
+        {
+            // Still this photo's card: only its place in the deck, and the one behind it, can have changed.
+            UpdatePosition();
+            ShowBehind();
+        }
+        else if (Front is { } front)
+        {
+            _ = PutOnCardWhenReadyAsync(front, deal);
+        }
+
+        UpdateLoading();
     }
+
+    /// <summary>
+    /// Decodes <paramref name="front"/>'s picture, off the UI thread, and then puts the photo on
+    /// the card, unless the deck was dealt again meanwhile: that deal sees to its own front.
+    /// </summary>
+    private async Task PutOnCardWhenReadyAsync(PhotoAsset front, int deal)
+    {
+        CardPicture? picture = null;
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                picture = await PictureOf(front);
+            }
+            catch (Exception)
+            {
+                picture = null; // it can't be decoded: the card says so, and can still be decided
+            }
+
+            if (deal != _deal)
+                return;
+            if (picture is not { IsLetGo: true })
+                break;
+
+            // Let go of while this waited for it (the page was leaving): decoded once more, as a
+            // picture that isn't there must never go up under a label as if it were.
+            _pictures.Remove(front.Id);
+            picture = null;
+        }
+
+        ShowOnCard(front, picture);
+    }
+
+    /// <summary>
+    /// Puts a photo on the card: its label, its place in the deck and its picture, in this one
+    /// step, with nothing awaited between them, so that one frame shows them all. From here the
+    /// card is this photo's, and a press decides it once that frame is up (see <see cref="ShownCard"/>).
+    /// </summary>
+    private void ShowOnCard(PhotoAsset photo, CardPicture? picture)
+    {
+        _shown = photo;
+        _card.Put(photo.Id);
+
+        CurrentDateText = photo.TakenAt.ToString("d MMM yyyy · HH:mm");
+        CurrentLocationText = photo.LocationText;
+        CurrentSizeText = photo.SizeBytes > 0 ? Helpers.ByteFormat.Human(photo.SizeBytes) : "";
+        IsCurrentVideo = photo.Kind == MediaKind.Video;
+        CurrentDurationText = photo.DurationText;
+        IsPictureMissing = picture is null;
+        UpdatePosition();
+
+        _view?.ShowCard(photo.Id, picture);
+        ShowBehind();
+        UpdateLoading();
+    }
+
+    /// <summary>Takes the card off: nothing is on it to decide until the next photo is put there.</summary>
+    private void TakeCardOff()
+    {
+        if (_shown is null)
+            return;
+
+        _shown = null;
+        _card.TakeOff();
+        _view?.HideCard();
+
+        // Its label goes with it: the card is only out of sight, and a screen reader would
+        // otherwise still read out the photo that has left.
+        CurrentDateText = "";
+        CurrentLocationText = "";
+        CurrentSizeText = "";
+        IsCurrentVideo = false;
+        CurrentDurationText = "";
+        IsPictureMissing = false;
+    }
+
+    /// <summary>The counter and the progress bar, for the card that is up.</summary>
+    private void UpdatePosition()
+    {
+        int done = Math.Clamp(_total - _queue.Count, 0, Math.Max(0, _total - 1));
+        PositionText = $"{done + 1} / {Math.Max(_total, 1)}";
+        Progress = _total == 0 ? 1 : (double)Math.Max(0, _total - _queue.Count) / _total;
+    }
+
+    /// <summary>The spinner: while the deck is being read, and while a card's picture is being decoded with no card up.</summary>
+    private void UpdateLoading() => IsLoading = _initializing || (_shown is null && _queue.Count > 0);
+
+    /// <summary>
+    /// Puts the picture of the photo behind the front on the back card, when it is decoded: a
+    /// preview only, with no label and nothing to press, and never the photo that is on the front
+    /// card or should be.
+    /// </summary>
+    private void ShowBehind()
+    {
+        var behind = _shown is not null && _queue.Count > 1 && _queue[0].Id == _shown.Id ? _queue[1] : null;
+        if (behind?.Id == _behind)
+            return;
+
+        _behind = behind?.Id;
+        _view?.ShowBackCard(null);
+        if (behind is not null)
+            _ = ShowBehindWhenReadyAsync(behind);
+    }
+
+    private async Task ShowBehindWhenReadyAsync(PhotoAsset behind)
+    {
+        CardPicture? picture;
+        try
+        {
+            picture = await PictureOf(behind);
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (_behind == behind.Id && picture is { IsLetGo: false })
+            _view?.ShowBackCard(picture);
+    }
+
+    /// <summary>
+    /// The decoded picture of a photo, started on first use and shared from then on. A picture
+    /// decoded for the same id when its file was another (the library was read again since, and
+    /// the item was edited in place, or its id given to a new file) is not this photo's: it is
+    /// let go of, and the file as it is now is decoded.
+    /// </summary>
+    private Task<CardPicture?> PictureOf(PhotoAsset photo)
+    {
+        if (_pictures.TryGetValue(photo.Id, out var kept))
+        {
+            if (IsSameFile(kept.Of, photo))
+                return kept.Decoding;
+            LetGoWhenDecoded(kept.Decoding);
+        }
+
+        var decoding = gallery.LoadCardPictureAsync(photo.Id, CardPixelSize);
+        _pictures[photo.Id] = (photo, decoding);
+        return decoding;
+    }
+
+    private static bool IsSameFile(PhotoAsset a, PhotoAsset b) =>
+        ReferenceEquals(a, b) ||
+        (a.SizeBytes == b.SizeBytes && a.FileModifiedAt == b.FileModifiedAt && a.TakenAt == b.TakenAt);
+
+    /// <summary>
+    /// Starts decoding the pictures the deck is about to need and lets go of the rest (see
+    /// <see cref="DeckCard.PicturesToKeep"/>). The one behind the front is decoded while the user
+    /// looks at the front, so the next card comes up as soon as the last has gone.
+    /// </summary>
+    private void KeepPictures()
+    {
+        var lastDecided = _history.TryPeek(out var last) ? last.Photo : null;
+        var keep = DeckCard.PicturesToKeep(_shown?.Id, [.. _queue.Take(2).Select(p => p.Id)], lastDecided?.Id);
+
+        foreach (var photoId in _pictures.Keys.Except(keep).ToList())
+        {
+            _pictures.Remove(photoId, out var dropped);
+            LetGoWhenDecoded(dropped.Decoding);
+        }
+
+        // The deck's own photos first, and only they replace a picture already kept for their id:
+        // they are the library's as last read.
+        int fromDeck = Math.Min(2, _queue.Count);
+        PhotoAsset?[] wanted = [.. _queue.Take(fromDeck), _shown, lastDecided];
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            if (wanted[i] is { } photo && keep.Contains(photo.Id) && (i < fromDeck || !_pictures.ContainsKey(photo.Id)))
+                _ = PictureOf(photo);
+        }
+    }
+
+    /// <summary>
+    /// Lets go of every decoded picture, as the page goes: they are large, and nothing else frees
+    /// them before the next deck decodes its own. The card goes with them, and whatever was on its
+    /// way to it is called off, so the deck is left with no card rather than one whose picture is
+    /// gone; should the page show again, the front is decoded and put on the card anew.
+    /// </summary>
+    public void ReleasePictures()
+    {
+        _deal++;
+        TakeCardOff();
+        _behind = null;
+        _view?.ShowBackCard(null);
+
+        foreach (var kept in _pictures.Values)
+            LetGoWhenDecoded(kept.Decoding);
+        _pictures.Clear();
+        UpdateLoading();
+    }
+
+    /// <summary>
+    /// Lets go of a picture once it is decoded. A card still showing its bitmap keeps it (see
+    /// <see cref="CardPicture"/>). Awaited, so that this happens on the UI thread, where pictures
+    /// are put on cards: never under a card that is just taking it.
+    /// </summary>
+    private static async void LetGoWhenDecoded(Task<CardPicture?> decoding)
+    {
+        try
+        {
+            (await decoding)?.Dispose();
+        }
+        catch (Exception)
+        {
+            // it never decoded: nothing to let go of
+        }
+    }
+
+    // ---------- Decisions ----------
 
     /// <summary>Keeps <paramref name="photo"/>, the card the user acted on (see <see cref="DecideOnDeckAsync"/>).</summary>
     public Task KeepAsync(PhotoAsset photo) => DecideOnDeckAsync(photo, SwipeDecision.Keep);
@@ -209,32 +521,36 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     public Task TrashAsync(PhotoAsset photo) => DecideOnDeckAsync(photo, SwipeDecision.Trash);
 
     /// <summary>
-    /// Decides about the card the user acted on, which the page hands over from before the card
-    /// flew out, rather than about whatever is at the front of the deck by then. Coming back from
-    /// the bin re-deals the deck once the library and the decisions are read, which takes a while
-    /// when the library has to be read again, and puts restored photos in front: a card swiped
-    /// meanwhile would otherwise send the photo just restored back to the bin in its place. A
-    /// photo the re-deal took off the deck is left alone.
+    /// Decides about the card the user acted on, which the page takes from <see cref="PhotoDecidedBy"/>
+    /// as the press arrives and hands over once the card has flown out, rather than about
+    /// whatever is at the front of the deck by then: coming back from the bin re-deals the deck
+    /// and puts restored photos in front. A photo the re-deal took off the deck is left alone.
     /// </summary>
     private Task DecideOnDeckAsync(PhotoAsset photo, SwipeDecision decision) =>
         _queue.Any(p => p.Id == photo.Id) ? DecideAsync(photo, decision, album: null) : Task.CompletedTask;
 
-    /// <summary>"Not sure yet" — pushes the photo to the end of the queue without a decision.</summary>
-    public void Later()
+    /// <summary>
+    /// "Not sure yet" — pushes <paramref name="photo"/>, the card the user acted on, to the end of
+    /// the queue without a decision. Its card goes at once, as after a decision.
+    /// </summary>
+    public void Later(PhotoAsset photo)
     {
-        if (_queue.Count <= 1)
+        if (_queue.Count <= 1 || _queue.RemoveAll(p => p.Id == photo.Id) == 0)
             return;
-        var photo = _queue[0];
-        _queue.RemoveAt(0);
+
         _queue.Add(photo);
+        if (_shown?.Id == photo.Id)
+            TakeCardOff();
         RefreshCards();
     }
 
-    /// <summary>Returns true when a photo was actually moved (so the view can animate the card away).</summary>
-    public async Task<bool> MoveToAlbumAsync()
+    /// <summary>
+    /// Moves <paramref name="photo"/>, the card the user pressed the button on, into an album they
+    /// pick. Returns true when it was moved.
+    /// </summary>
+    public async Task<bool> MoveToAlbumAsync(PhotoAsset photo)
     {
-        var photo = CurrentPhoto;
-        if (photo is null || _moving)
+        if (_moving || !_queue.Any(p => p.Id == photo.Id))
             return false;
 
         _moving = true;
@@ -352,6 +668,22 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
 
         var step = _history.Pop();
         var photo = step.Photo;
+
+        // What it undoes may have been carried out since: the bin emptied with this photo in it.
+        // Then the photo is in the system trash, or deleted, and no longer in the bin to take back
+        // out: forgetting the decision here would drop its entry under IN SYSTEM TRASH, the one
+        // place it can still be restored from, and deal a card for a photo that isn't there.
+        if (!step.Copied && await gallery.Store.FindAsync(photo.Id) is { Decision: SwipeDecision.Trash, CommittedAt: not null })
+        {
+            CanUndo = _history.Count > 0;
+            await Shell.Current.DisplayAlertAsync("Can't undo that",
+                gallery.Library.CanRestoreFromSystemTrash
+                    ? "The bin has been emptied since, so this photo is in the system trash now. " +
+                      "You can still restore it from the bin, under IN SYSTEM TRASH."
+                    : "The bin has been emptied since, so this photo is no longer in it.", "OK");
+            return;
+        }
+
         if (step.Copied)
         {
             // The original is gone (to the system trash, or deleted); its copy is the photo now.
@@ -372,9 +704,25 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
         else
         {
             await gallery.Store.RemoveAsync(photo.Id);
+
+            // Undecided again. But only a photo the library has now is dealt: one deleted or moved
+            // by another app meanwhile, or on a card that has been taken out, has no card to come
+            // back to here.
+            if (await FindAsync(photo.Id) is null)
+            {
+                await RefreshBinBadgeAsync();
+                CanUndo = _history.Count > 0;
+                await Shell.Current.DisplayAlertAsync("Undone, but it can't be shown",
+                    "The decision was undone. The photo itself isn't in your gallery right now (removed by " +
+                    "another app, or on storage that isn't connected), so there is no card to show for it.", "OK");
+                return;
+            }
         }
 
-        // The badge first: the photo goes to the front of the deck and onto the screen in one go.
+        // The badge first, so nothing is awaited between the deck and the card. The photo goes to
+        // the front of the deck, and the card that is up goes at once (see RefreshCards): Undo is
+        // the user's own doing, and the photo it brings back comes up with its picture, kept
+        // decoded since the decision, so as a rule in this same step.
         await RefreshBinBadgeAsync();
         _queue.RemoveAll(p => p.Id == photo.Id);
         _queue.Insert(0, photo);
@@ -390,7 +738,8 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
 
     /// <summary>
     /// Records the decision about <paramref name="photo"/> and takes it off the deck, by id: the
-    /// deck can have been re-dealt since the user acted on it.
+    /// deck can have been re-dealt since the user acted on it. Its card goes with it; the next
+    /// photo's comes up when its picture is ready.
     /// </summary>
     private async Task DecideAsync(PhotoAsset photo, SwipeDecision decision, AlbumInfo? album, Step? step = null)
     {
@@ -407,6 +756,10 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
             DecidedAt = DateTime.UtcNow,
             SizeBytes = size,
             TargetAlbum = album?.Name,
+
+            // Where it is, for emptying the bin: a photo on an SD card that has been taken out by
+            // then is not in the library, and must not be taken for deleted.
+            VolumeName = decision == SwipeDecision.Trash && photo.VolumeName.Length > 0 ? photo.VolumeName : null,
         });
 
         _history.Push(step ?? new Step(photo));

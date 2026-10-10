@@ -50,16 +50,68 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         // Ask only when there is no access yet. With the Android 14+ "selected photos" subset,
         // READ_MEDIA_IMAGES stays denied, and asking again doesn't show a dialog: it reopens the
         // system photo picker. Home asks on every appearance, so the picker kept coming back.
-        if (await Permissions.CheckStatusAsync<GalleryPermission>() == PermissionStatus.Granted ||
-            await HasSelectedPhotosAccessAsync())
+        if (await Permissions.CheckStatusAsync<GalleryPermission>() == PermissionStatus.Granted)
+        {
+            await EnsureMediaLocationAsync();
+            return true;
+        }
+
+        if (await HasSelectedPhotosAccessAsync())
             return true;
 
-        if (await Permissions.RequestAsync<GalleryPermission>() == PermissionStatus.Granted)
+        // With ACCESS_MEDIA_LOCATION in the same request: it is in the gallery permissions' group,
+        // so Android shows the one dialog it shows for them alone, and "Allow" grants it too. The
+        // duplicate scan needs it from its first run (see ReadsOriginalBytesAsync).
+        if (await Permissions.RequestAsync<GalleryWithLocationPermission>() == PermissionStatus.Granted)
             return true;
 
-        // Android 14+: the user may have granted access to selected photos only.
-        return await HasSelectedPhotosAccessAsync();
+        // Not everything was granted. The library is usable all the same with the gallery
+        // permissions alone, or (Android 14+) with access to selected photos only.
+        return await Permissions.CheckStatusAsync<GalleryPermission>() == PermissionStatus.Granted ||
+               await HasSelectedPhotosAccessAsync();
     }
+
+    // Whether this process has seen to ACCESS_MEDIA_LOCATION on top of full photo access.
+    private static bool _mediaLocationSeenTo;
+
+    /// <summary>
+    /// Gets ACCESS_MEDIA_LOCATION for an install that has full photo access without it: one from
+    /// before the two were asked for together, or one given access in the system settings.
+    /// Android grants it without showing anything, as its group is granted already (seen on
+    /// Android 13 and 15: the request comes back granted, with no dialog). Asked from Home's own
+    /// load, like every permission request, and once per process: should Android say no, nothing
+    /// is hashed (<see cref="ReadsOriginalBytesAsync"/>) and nothing asks again until the app next
+    /// starts. Never asked under "selected photos only", which doesn't get it.
+    /// </summary>
+    private static async Task EnsureMediaLocationAsync()
+    {
+        if (_mediaLocationSeenTo)
+            return;
+        _mediaLocationSeenTo = true;
+
+        try
+        {
+            if (await Permissions.CheckStatusAsync<MediaLocationPermission>() != PermissionStatus.Granted)
+                await Permissions.RequestAsync<MediaLocationPermission>();
+        }
+        catch (Exception)
+        {
+            // The library works without it; only the identical-files check has to wait.
+        }
+    }
+
+    public async Task<bool> ReadsOriginalBytesAsync() =>
+        await Permissions.CheckStatusAsync<MediaLocationPermission>() == PermissionStatus.Granted;
+
+    /// <summary>The same, for a thread that can't wait: whether the app holds ACCESS_MEDIA_LOCATION now.</summary>
+    private static bool HoldsMediaLocation =>
+        Application.Context.CheckSelfPermission(global::Android.Manifest.Permission.AccessMediaLocation)
+            == global::Android.Content.PM.Permission.Granted;
+
+    // The check RequestAccessAsync makes before it asks, alone: a status check shows no dialog.
+    public async Task<bool> HasAccessAsync() =>
+        await Permissions.CheckStatusAsync<GalleryPermission>() == PermissionStatus.Granted ||
+        await HasSelectedPhotosAccessAsync();
 
     public async Task<bool> HasLimitedAccessAsync() =>
         await Permissions.CheckStatusAsync<GalleryPermission>() != PermissionStatus.Granted &&
@@ -161,6 +213,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
                 DurationMs = isVideo ? cursor.GetLong(durationCol) : 0,
                 FileName = cursor.IsNull(nameCol) ? "" : cursor.GetString(nameCol) ?? "",
                 FolderPath = relativePath,
+                VolumeName = volumeName,
                 IsFavorite = favoriteCol >= 0 && cursor.GetInt(favoriteCol) == 1,
             });
         }
@@ -205,16 +258,57 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     {
         try
         {
-            var source = Android.Graphics.ImageDecoder.CreateSource(Resolver, uri);
-            using var bitmap = Android.Graphics.ImageDecoder.DecodeBitmap(
-                source, new SizeCapListener(maxPixelSize));
-            return CompressToStream(bitmap, 92);
+            using var bitmap = DecodeOriginalBitmap(uri, maxPixelSize);
+            return bitmap is null ? null : CompressToStream(bitmap, 92);
         }
         catch
         {
             return null; // unsupported format — the caller falls back to the thumbnail
         }
     }
+
+    /// <summary>The same decode, as the bitmap itself; null when the format isn't supported.</summary>
+    private static Android.Graphics.Bitmap? DecodeOriginalBitmap(AndroidUri uri, int maxPixelSize)
+    {
+        try
+        {
+            var source = Android.Graphics.ImageDecoder.CreateSource(Resolver, uri);
+            return Android.Graphics.ImageDecoder.DecodeBitmap(source, new SizeCapListener(maxPixelSize));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The item's picture decoded for the swipe card, at most <paramref name="maxPixelSize"/> on
+    /// the long edge: the original file for a photo, as <see cref="GetImageStreamAsync"/> gives it
+    /// at that size, and the poster frame for a video. Handed over as a bitmap rather than as a
+    /// stream for an image control to decode again, so the card can put it on screen in the very
+    /// step it puts the photo's label there (see <see cref="CardPicture"/>). Null when the item
+    /// is gone or can't be decoded.
+    /// </summary>
+    public Task<CardPicture?> GetCardPictureAsync(string photoId, int maxPixelSize) =>
+        Task.Run<CardPicture?>(() =>
+        {
+            try
+            {
+                var uri = ThumbnailUriFor(photoId);
+
+                bool isVideo;
+                lock (_kindCache)
+                    isVideo = _kindCache.GetValueOrDefault(photoId).Kind == MediaKind.Video;
+
+                var bitmap = isVideo ? null : DecodeOriginalBitmap(uri, maxPixelSize);
+                bitmap ??= Resolver.LoadThumbnail(uri, new Android.Util.Size(maxPixelSize, maxPixelSize), null);
+                return bitmap is null ? null : new CardPicture(bitmap);
+            }
+            catch
+            {
+                return null; // item gone or unreadable: the card says it has no preview
+            }
+        });
 
     public Task<byte[]?> GetThumbnailPixelsAsync(string photoId, int size, CancellationToken ct = default) =>
         Task.Run<byte[]?>(() =>
@@ -271,7 +365,14 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         {
             try
             {
-                using var stream = Resolver.OpenInputStream(UriFor(photoId));
+                // The file's own bytes, or nothing. Without ACCESS_MEDIA_LOCATION Android hands
+                // over a photo or video the app didn't create with its location blanked, and two
+                // files that differ only in where they were taken would hash alike. Asked for the
+                // original, it refuses instead of blanking should the permission be gone after all.
+                if (!HoldsMediaLocation)
+                    return null;
+
+                using var stream = Resolver.OpenInputStream(MediaStore.SetRequireOriginal(UriFor(photoId)));
                 if (stream is null)
                     return null;
 
@@ -393,56 +494,198 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         return 0L;
     });
 
-    public Task<bool> MoveToSystemTrashAsync(IReadOnlyList<string> photoIds) => SetTrashedAsync(photoIds, trashed: true);
-
-    public Task<bool> RestoreFromSystemTrashAsync(IReadOnlyList<string> photoIds) => SetTrashedAsync(photoIds, trashed: false);
-
-    private async Task<bool> SetTrashedAsync(IReadOnlyList<string> photoIds, bool trashed)
+    public async Task<TrashResult> MoveToSystemTrashAsync(
+        IReadOnlyList<string> photoIds, IReadOnlyDictionary<string, string> knownVolumes)
     {
         if (photoIds.Count == 0)
-            return true;
+            return TrashResult.Nothing;
 
-        if (OperatingSystem.IsAndroidVersionAtLeast(30))
+        // The items the request itself takes out of the library, each of which it found there
+        // first. Android 11+: the ones sent to the system trash with the user's consent. Android 10
+        // has no system trash: there they are deleted for good, through the folders the user opens
+        // for the app, and each is noted once it is checked gone.
+        var handled = new HashSet<string>(StringComparer.Ordinal);
+        try
         {
-            // Only what can still change: to trash, what the gallery has; to restore, what MediaStore
-            // still has in the trash. Anything else is there already, gone for good, or on a card that
-            // isn't mounted, whose uri would fail the whole request (applyBatch opens every item's
-            // volume before it changes any). And an item already in the trash isn't trashed again,
-            // which would push its purge back.
-            var found = await Task.Run(() => FindIds(photoIds, inTrash: !trashed));
-            if (found is null)
-                return false; // MediaStore can't say
-            var toChange = photoIds.Where(found.Contains).Distinct().ToList();
-            if (toChange.Count == 0)
-                return true;
-
-            var uris = await ResolveTypedUrisAsync(toChange);
-            try
-            {
-                // System trash: auto-purged by Android after ~30 days; the same API restores (value=false).
-                var pending = MediaStore.CreateTrashRequest(Resolver, uris, trashed);
-                if (!await IntentSenderLauncher.LaunchAsync(pending.IntentSender))
-                    return false;
-            }
-            catch (Java.Lang.Exception)
-            {
-                return false; // e.g. item vanished or provider rejected the request
-            }
-
-            // The consent screen reports success even when MediaStore refuses the change (it
-            // swallows the error, as for an SD card item asked for through "external"), so only the
-            // gallery can tell: every item sent has left it (trashed), or is back in it (restored).
-            // A query that fails tells nothing, so that counts as not done.
-            var inGallery = await Task.Run(() => FindIds(toChange));
-            return inGallery is not null && toChange.All(id => inGallery.Contains(id) == !trashed);
+            if (OperatingSystem.IsAndroidVersionAtLeast(30))
+                await RequestTrashedAsync(photoIds, trashed: true, handled);
+            else
+                await DeleteViaSafAsync(photoIds, handled);
+        }
+        catch (Exception)
+        {
+            // What it got through before failing shows in the library, read below.
         }
 
-        if (!trashed)
-            return false; // no system trash to restore from on Android 10
+        // What the request reports settles nothing. The consent screen reports success even when
+        // MediaStore refuses the change (it swallows the error), and can close without reporting
+        // (a rotation). And an item the request never touched isn't gone for that: MediaStore hides
+        // the rows of an SD card that is out, and of photos outside a limited selection, exactly
+        // as if they had been deleted. So each item is settled from where it is now (see
+        // TrashSettlement): only one found in the trash, or one the request handled that has left
+        // a library still able to see where it was, is said to be removed.
+        bool seesWholeLibrary = await SeesWholeLibraryAsync();
+        return await Task.Run(() =>
+        {
+            var volumes = VolumesNow();
+            return TrashSettlement.Settle(photoIds, handled,
+                inLibrary: FindIds(photoIds), inSystemTrash: FindIds(photoIds, inTrash: true),
+                id => volumes.IsMounted(VolumeOf(id, knownVolumes.GetValueOrDefault(id))), volumes.SomeAway,
+                seesWholeLibrary);
+        });
+    }
 
-        // Android 10 fallback: no system trash — permanent delete, through the folders the user
-        // opens for the app.
-        return await DeleteViaSafAsync(photoIds);
+    /// <summary>
+    /// Whether the app has access to every photo, rather than to the ones the user selected
+    /// (Android 14+) or to none: only then does a photo the library doesn't list mean anything.
+    /// </summary>
+    private static async Task<bool> SeesWholeLibraryAsync()
+    {
+        try
+        {
+            return await Permissions.CheckStatusAsync<GalleryPermission>() == PermissionStatus.Granted;
+        }
+        catch (Exception)
+        {
+            return false; // it can't be told, so nothing is taken for gone
+        }
+    }
+
+    public async Task<RestoreOutcome> RestoreFromSystemTrashAsync(string photoId, string? knownVolume)
+    {
+        if (!CanRestoreFromSystemTrash)
+            return RestoreOutcome.NotRestored; // no system trash to restore from on Android 10
+
+        string[] ids = [photoId];
+        try
+        {
+            await RequestTrashedAsync(ids, trashed: false, handled: null);
+        }
+        catch (Exception)
+        {
+            // Where the item is now tells, just below.
+        }
+
+        // As after a trash request, only the library can tell. An item in neither the library nor
+        // the trash was purged or removed elsewhere, unless its card is out: then it is still in
+        // the trash there, and will be purged from it if nobody restores it once the card is back.
+        // The same goes for one outside the photos the app may see.
+        bool seesWholeLibrary = await SeesWholeLibraryAsync();
+        return await Task.Run(() =>
+        {
+            var volumes = VolumesNow();
+            return TrashSettlement.SettleRestore(
+                inLibrary: FindIds(ids)?.Contains(photoId), inSystemTrash: FindIds(ids, inTrash: true)?.Contains(photoId),
+                volumes.IsMounted(VolumeOf(photoId, knownVolume)), volumes.SomeAway, seesWholeLibrary);
+        });
+    }
+
+    /// <summary>
+    /// Android 11+: asks Android to move items to the system trash, or back out of it, behind its
+    /// consent screen. What came of it is for the caller to read from the library afterwards;
+    /// <paramref name="handled"/>, when given, gets the items that were sent with the user's
+    /// consent, each of which the library had when the request began.
+    /// </summary>
+    private async Task RequestTrashedAsync(IReadOnlyList<string> photoIds, bool trashed, HashSet<string>? handled)
+    {
+        if (!OperatingSystem.IsAndroidVersionAtLeast(30))
+            return; // no system trash before Android 11
+
+        // Only what can still change: to trash, what the gallery has; to restore, what MediaStore
+        // still has in the trash. Anything else is there already, gone for good, or on a card that
+        // isn't mounted, whose uri would fail the whole request (applyBatch opens every item's
+        // volume before it changes any). And an item already in the trash isn't trashed again,
+        // which would push its purge back.
+        var found = await Task.Run(() => FindIds(photoIds, inTrash: !trashed));
+        if (found is null)
+            return; // MediaStore can't say
+        var toChange = photoIds.Where(found.Contains).Distinct().ToList();
+        if (toChange.Count == 0)
+            return;
+
+        var uris = await ResolveTypedUrisAsync(toChange);
+        try
+        {
+            // System trash: auto-purged by Android after ~30 days; the same API restores (value=false).
+            var pending = MediaStore.CreateTrashRequest(Resolver, uris, trashed);
+            if (await IntentSenderLauncher.LaunchAsync(pending.IntentSender))
+                handled?.UnionWith(toChange);
+        }
+        catch (Java.Lang.Exception)
+        {
+            // e.g. an item vanished, or the provider rejected the request
+        }
+    }
+
+    /// <summary>
+    /// The storage volumes as they are now: the MediaStore volumes that are mounted (null when
+    /// that can't be asked), and whether a volume the phone knows of is away.
+    /// </summary>
+    private sealed record VolumeState(HashSet<string>? Mounted, bool SomeAway)
+    {
+        /// <summary>
+        /// Whether <paramref name="volume"/> is mounted: null when the item's volume isn't known,
+        /// or the mounted volumes can't be asked.
+        /// </summary>
+        public bool? IsMounted(string? volume) =>
+            string.IsNullOrEmpty(volume) || Mounted is null ? null : Mounted.Contains(volume);
+    }
+
+    /// <summary>
+    /// The volume an item is on, as MediaStore names it: the one recorded when it went to the bin,
+    /// or else the one a library read of this run found it on; null when neither is known. The
+    /// library itself can't be asked: it hides an item whose volume isn't mounted.
+    /// </summary>
+    private string? VolumeOf(string photoId, string? knownVolume)
+    {
+        if (!string.IsNullOrEmpty(knownVolume))
+            return knownVolume;
+
+        lock (_kindCache)
+            return _kindCache.TryGetValue(photoId, out var seen) && seen.VolumeName.Length > 0 ? seen.VolumeName : null;
+    }
+
+    /// <summary>
+    /// Which volumes are mounted now, and whether one is away: a volume this run saw items on, one
+    /// Android lists as there but not mounted, or (Android 11+) one MediaStore expects back that isn't. An
+    /// item whose volume isn't known may be on one of those. Blocking.
+    /// </summary>
+    private VolumeState VolumesNow()
+    {
+        HashSet<string> mounted;
+        try
+        {
+            mounted = new HashSet<string>(MediaStore.GetExternalVolumeNames(Application.Context), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return new VolumeState(Mounted: null, SomeAway: true); // it can't be told, so nothing is taken for gone
+        }
+
+        bool someAway;
+        lock (_kindCache)
+            someAway = _kindCache.Values.Any(seen => seen.VolumeName.Length > 0 && !mounted.Contains(seen.VolumeName));
+
+        try
+        {
+            // The recent volumes are the mounted ones and the ones Android expects back.
+            if (!someAway && OperatingSystem.IsAndroidVersionAtLeast(30))
+                someAway = MediaStore.GetRecentExternalVolumeNames(Application.Context)
+                    .Any(name => !string.IsNullOrEmpty(name) && !mounted.Contains(name));
+
+            if (!someAway &&
+                Application.Context.GetSystemService(Context.StorageService) is Android.OS.Storage.StorageManager storage)
+            {
+                someAway = storage.StorageVolumes.Any(volume => !volume.IsPrimary &&
+                    volume.State is not (global::Android.OS.Environment.MediaMounted or global::Android.OS.Environment.MediaMountedReadOnly));
+            }
+        }
+        catch (Exception)
+        {
+            someAway = true;
+        }
+
+        return new VolumeState(mounted, someAway);
     }
 
     /// <summary>
@@ -457,32 +700,36 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     /// photo after the user's consent, it drops the row but keeps the file, and the next media
     /// scan brings the photo back. The provider deletes only inside folders the user opened for
     /// the app, so every item's folder is granted first (see <see cref="GrantFoldersAsync"/>),
-    /// and nothing is deleted unless all are. True once every item is gone.
+    /// and nothing is deleted unless all are. Each item deleted and checked gone is added to
+    /// <paramref name="deleted"/> as it goes, so what went before a failure is still known. An
+    /// item MediaStore has no row for is left out of it: nothing here can check its file. Every
+    /// item in it had a row when this began.
     /// </summary>
-    private static async Task<bool> DeleteViaSafAsync(IReadOnlyList<string> photoIds)
+    private static async Task DeleteViaSafAsync(IReadOnlyList<string> photoIds, HashSet<string> deleted)
     {
         var files = await Task.Run(() => FilesToDelete(photoIds));
         if (files is null)
-            return false; // nothing was deleted
+            return; // nothing was deleted
 
         var grants = await Task.Run(PersistedFolderGrants);
         if (!await GrantFoldersAsync(files, grants))
-            return false; // nothing was deleted
+            return; // nothing was deleted
 
         // Each file has a grant now; one that can't be deleted doesn't keep the others.
-        bool allGone = true;
         foreach (var file in files)
         {
             var (tree, documentId) = GrantFor(grants, file)!.Value;
-            allGone &= await DeleteDocumentAsync(file, tree, documentId);
+            if (await DeleteDocumentAsync(file, tree, documentId))
+                deleted.Add(file.PhotoId);
         }
-        return allGone;
     }
 
     /// <summary>
-    /// The file of each item still in MediaStore (an item without a row is gone already), or null
-    /// when an item can't be looked up, or its file is somewhere the storage provider doesn't
-    /// delete from (not internal storage or an SD card). Blocking.
+    /// The file of each item MediaStore has a row for, or null when an item can't be looked up, or
+    /// its file is somewhere the storage provider doesn't delete from (not internal storage or an
+    /// SD card). An item without a row is skipped: it was deleted already, or it is on an SD card
+    /// that isn't mounted, whose rows MediaStore hides, and from here the two look the same. The
+    /// caller tells them apart afterwards (see <see cref="TrashSettlement"/>). Blocking.
     /// </summary>
     private static List<FileToDelete>? FilesToDelete(IReadOnlyList<string> photoIds)
     {
@@ -497,7 +744,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
                 if (cursor is null)
                     return null;
                 if (!cursor.MoveToFirst())
-                    continue; // deleted already
+                    continue; // no row: deleted already, or its card is out
 
                 var path = cursor.IsNull(0) ? null : cursor.GetString(0);
                 if (path is null || StorageDocuments.DocumentIdOfPath(path, InternalStoragePath) is not { } documentId)
@@ -612,12 +859,16 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
                 return false;
         }
 
-        if (!await Task.Run(() => IsInGallery(file.PhotoId)))
+        // Asked so that a query that fails says so (null): it must not pass for "no longer listed".
+        string[] id = [file.PhotoId];
+        if (await Task.Run(() => FindIds(id)) is not { } listed)
+            return false;
+        if (!listed.Contains(file.PhotoId))
             return true;
 
         // The file is gone, but MediaStore still lists it: a scan of the missing file drops the row.
         await ScanAsync(file.Path, file.MimeType);
-        return !await Task.Run(() => IsInGallery(file.PhotoId));
+        return await Task.Run(() => FindIds(id)) is { } after && !after.Contains(file.PhotoId);
     }
 
     /// <summary>What the storage provider finds where an item's file is.</summary>
@@ -647,7 +898,9 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         {
             using var cursor = Resolver.Query(document,
                 [DocumentsContract.Document.ColumnMimeType, DocumentsContract.Document.ColumnSize], null, null, null);
-            if (cursor is null || !cursor.MoveToFirst())
+            if (cursor is null)
+                return DocumentFound.Other; // the provider didn't answer: it can't be told
+            if (!cursor.MoveToFirst())
                 return DocumentFound.Nothing;
 
             bool isFile = !cursor.IsNull(0) && cursor.GetString(0) != DocumentsContract.Document.MimeTypeDir;
@@ -842,7 +1095,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         if (!grants.Any(grant => grant.DocumentId == browsed))
             return false;
 
-        return !browsed.StartsWith(PrimaryVolume, StringComparison.Ordinal) ||
+        return !MoveRouting.IsOnInternalStorage(browsed) ||
                !galleryFolders.Any(folder => MoveRouting.IsGrantFor(browsed, folder));
     }
 
@@ -980,7 +1233,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
             case BrowsedRoute.InPlace:
                 // Should MediaStore still refuse, copy within the same volume.
                 return await MoveInPlaceAsync(job, relativePath,
-                    browsed.StartsWith(PrimaryVolume, StringComparison.Ordinal)
+                    MoveRouting.IsOnInternalStorage(browsed)
                         ? () => MoveViaCopyAsync(job, relativePath, TypedCollectionFor(job.Kind))
                         : () => MoveViaSafAsync(job, treeUri, folderDocumentId: null));
 
@@ -1076,6 +1329,27 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     private const string OtherProviderRefused =
         "Sort & Delete moves photos only into folders on this phone's own storage or its SD card, " +
         "where it can check the copy before it removes the original. Choose a folder there.";
+
+    /// <summary>
+    /// Android's own "Downloads" view, where Android 10's folder picker opens the first time. It
+    /// lists the phone's Download folder, but as that view's documents rather than the storage's,
+    /// so it is another provider's like any other.
+    /// </summary>
+    private const string DownloadsViewAuthority = "com.android.providers.downloads.documents";
+
+    private const string DownloadsViewRefused =
+        "That is Android's Downloads view, where Sort & Delete can't check the copy before it removes " +
+        "the original. Find the folder under this phone's storage on that screen instead, or choose another.";
+
+    /// <summary>
+    /// Why a folder of another provider is refused. For the Downloads view "this phone's own
+    /// storage" would read as wrong, as its files are on it: there the answer is what would be
+    /// said of the Download folder itself, which Android 10 only copies into.
+    /// </summary>
+    private static string OtherProviderProblem(AndroidUri treeUri) =>
+        treeUri.Authority != DownloadsViewAuthority ? OtherProviderRefused
+        : CanRemoveOriginals ? DownloadsViewRefused
+        : AndroidTenMovesInPlaceOnly;
 
     private static string LocationWouldBeLost(MoveJob job) =>
         "Moving it there means copying it, and Android won't let Sort & Delete read where it " +
@@ -1803,7 +2077,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         // when the phone restarts.
         var album = SafAlbumFor(treeUri.ToString()!);
         if (TreeDocumentIdOf(album) is not { } picked)
-            return new FolderPick(Album: null, OtherProviderRefused);
+            return new FolderPick(Album: null, OtherProviderProblem(treeUri));
 
         // The top of the storage (Android 10's picker offers it) or another app's folder.
         if (BrowsedFolderProblem(picked) is { } problem)
@@ -1847,14 +2121,16 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
 
     private static AlbumInfo SafAlbumFor(string treeUri)
     {
-        // tree document ids look like "primary:MyAlbum/Sub" or "1B2C-3D4E:Foo" (SD card)
+        // tree document ids look like "primary:MyAlbum/Sub" or "1B2C-3D4E:Foo" (SD card), and on
+        // Android 10 "home:Sub" for Documents/Sub on internal storage
         string pretty;
         try
         {
             var docId = DocumentsContract.GetTreeDocumentId(AndroidUri.Parse(treeUri)!) ?? "";
-            var parts = docId.Split(':', 2);
-            var volume = parts[0] == "primary" ? "Internal storage" : $"SD card ({parts[0]})";
-            pretty = parts.Length > 1 && parts[1].Length > 0 ? $"{volume}/{parts[1]}" : volume;
+            if (!MoveRouting.TryLocateDocumentId(docId, out var volumeName, out var path))
+                (volumeName, path) = (docId, "");
+            var volume = MoveRouting.IsOnInternalStorage(docId) ? "Internal storage" : $"SD card ({volumeName})";
+            pretty = path.Length > 0 ? $"{volume}/{path}" : volume;
         }
         catch
         {
@@ -1917,7 +2193,7 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     private static (AndroidUri Tree, string FolderDocumentId)? FindFolderGrant(
         List<(AndroidUri Tree, string DocumentId)> grants, string relativePath)
     {
-        foreach (var (tree, documentId) in grants.OrderBy(g => g.DocumentId.StartsWith(PrimaryVolume, StringComparison.Ordinal) ? 0 : 1))
+        foreach (var (tree, documentId) in grants.OrderBy(g => MoveRouting.IsOnInternalStorage(g.DocumentId) ? 0 : 1))
         {
             if (MoveRouting.FolderDocumentId(documentId, relativePath) is { } folder)
                 return (tree, folder);
@@ -2063,16 +2339,19 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         }
     }
 
-    /// <summary>The file of a document of the device's storage provider ("primary:Foo/x.jpg" is /storage/emulated/0/Foo/x.jpg).</summary>
+    /// <summary>
+    /// The file of a document of the device's storage provider: "primary:Foo/x.jpg" is
+    /// /storage/emulated/0/Foo/x.jpg, and so is "home:x.jpg" /storage/emulated/0/Documents/x.jpg.
+    /// </summary>
     private static string? PathOfDocument(AndroidUri document)
     {
         try
         {
-            var parts = (DocumentsContract.GetDocumentId(document) ?? "").Split(':', 2);
-            if (parts.Length < 2)
+            var documentId = DocumentsContract.GetDocumentId(document) ?? "";
+            if (!MoveRouting.TryLocateDocumentId(documentId, out var volume, out var path))
                 return null;
-            var root = parts[0] == "primary" ? InternalStoragePath : $"/storage/{parts[0]}";
-            return $"{root}/{parts[1]}";
+            var root = MoveRouting.IsOnInternalStorage(documentId) ? InternalStoragePath : $"/storage/{volume}";
+            return $"{root}/{path}";
         }
         catch (Java.Lang.Exception)
         {

@@ -1,3 +1,5 @@
+using System.Collections.Frozen;
+
 namespace SortAndDelete.Models;
 
 /// <summary>
@@ -41,6 +43,17 @@ public sealed class DuplicateGroup
     /// can preselect them; anything matched perceptually is a judgement call.
     /// </summary>
     public required bool IsExact { get; init; }
+
+    /// <summary>
+    /// The ids of the members no level ticks for the bin by itself: each looks like another
+    /// member of the very same pixel size without being an identical file of it. A copy that was
+    /// re-sent is a resized one. Two pictures of one size that agree at fingerprint scale can be
+    /// different pictures all the same (one screen with other values on it, two slides, two
+    /// labelled images): a fingerprint is taken from a thumbnail 32 pixels across, where text is
+    /// gone. They stay in the group for the user to judge. A member whose size isn't known
+    /// counts too. Empty for a group of identical files.
+    /// </summary>
+    public IReadOnlySet<string> SameSizeLookalikes { get; init; } = FrozenSet<string>.Empty;
 
     /// <summary>Bytes that would come back if everything except the keeper went.</summary>
     public long ReclaimableBytes => Items.Where(p => p.Id != Keeper.Id).Sum(p => p.SizeBytes);

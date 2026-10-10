@@ -177,4 +177,18 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     public ImageSource CreateThumbnail(string photoId, int maxPixelSize) =>
         ImageSource.FromStream(async ct =>
             await library.GetImageStreamAsync(photoId, maxPixelSize, ct) ?? Stream.Null);
+
+    /// <summary>
+    /// The picture for a photo's card on the review deck, ready to go on screen with the card's
+    /// label (see <see cref="CardPicture"/>): decoded here, off the UI thread, on Android. Null
+    /// when the photo can't be shown (gone, or a format nothing decodes).
+    /// </summary>
+    public Task<CardPicture?> LoadCardPictureAsync(string photoId, int maxPixelSize) =>
+#if ANDROID
+        library is AndroidPhotoLibraryService android
+            ? android.GetCardPictureAsync(photoId, maxPixelSize)
+            : Task.FromResult<CardPicture?>(null);
+#else
+        Task.FromResult<CardPicture?>(new CardPicture(CreateThumbnail(photoId, maxPixelSize)));
+#endif
 }

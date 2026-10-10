@@ -259,6 +259,49 @@ public class TickCarryOverTests
         Assert.Equal(["3"], Ticked(rescanned));
     }
 
+    /// <summary>
+    /// A tick says "this one goes, that one stays". With the one to keep rewritten since (drawn
+    /// on in a gallery app, saved in place), the copy ticked beside it may be the only clean one
+    /// left: the tick isn't carried, and the level decides afresh.
+    /// </summary>
+    [Theory]
+    [InlineData(5_000_000, 60)] // rewritten in place: the same size, a later stamp
+    [InlineData(4_200_000, 0)]  // another file under the same id
+    public void A_tick_is_not_carried_over_once_the_keeper_has_changed(long keeperSizeNow, int minutesLater)
+    {
+        var shown = TickCarryOver.Apply(null, [Group(Photo("1"), Photo("2"), Photo("3"))], preselect: false);
+        var before = After(shown, ("2", true));
+
+        var keeperNow = Photo("1", size: keeperSizeNow, fileModifiedAt: Written.AddMinutes(minutesLater));
+        var rescanned = TickCarryOver.Apply(before, [Group(keeperNow, Photo("2"), Photo("3"))], preselect: false);
+
+        Assert.Empty(Ticked(rescanned));
+    }
+
+    /// <summary>
+    /// The same for a tick the level put there itself: an identical copy, ticked as such, whose
+    /// keeper was then edited is a same-size look-alike of it now, which no level ticks.
+    /// </summary>
+    [Fact]
+    public void A_levels_own_tick_on_an_identical_copy_does_not_outlive_an_edit_of_the_keeper()
+    {
+        var identical = new DuplicateGroup { Items = [Photo("keep"), Photo("copy")], Keeper = Photo("keep"), IsExact = true };
+        var shown = TickCarryOver.Apply(null, [identical], preselect: true);
+        Assert.Equal(["copy"], Ticked(shown));
+
+        var edited = Photo("keep", fileModifiedAt: Written.AddMinutes(30));
+        var lookalikes = new DuplicateGroup
+        {
+            Items = [edited, Photo("copy")],
+            Keeper = edited,
+            IsExact = false,
+            SameSizeLookalikes = new HashSet<string> { "keep", "copy" },
+        };
+        var rescanned = TickCarryOver.Apply(shown, [lookalikes], preselect: true);
+
+        Assert.Empty(Ticked(rescanned));
+    }
+
     /// <summary>iOS moves the modification time for as little as favouriting, and for a tick that is a change too.</summary>
     [Fact]
     public void A_ticked_item_whose_modification_time_moved_goes_back_to_the_level_s_tick()

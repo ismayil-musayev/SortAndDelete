@@ -23,6 +23,18 @@ public class MainActivity : MauiAppCompatActivity
         EdgeToEdge.Enable(this, SystemBarStyle.Dark(transparent), SystemBarStyle.Dark(transparent));
     }
 
+    /// <summary>
+    /// Notes when each finger goes down, as the system stamped the touch, before anything handles
+    /// it. The review deck places a press by that time: a tap is about the card that was up when
+    /// the finger went down, however long the app takes to get to it (see <see cref="PressClock"/>).
+    /// </summary>
+    public override bool DispatchTouchEvent(Android.Views.MotionEvent? e)
+    {
+        if (e is { ActionMasked: Android.Views.MotionEventActions.Down or Android.Views.MotionEventActions.PointerDown })
+            PressClock.NoteFingerDown(e.EventTime);
+        return base.DispatchTouchEvent(e);
+    }
+
     protected override void OnActivityResult(int requestCode, Result resultCode, Intent? data)
     {
         base.OnActivityResult(requestCode, resultCode, data);

@@ -25,6 +25,13 @@ public interface IPhotoLibraryService
     Task<bool> RequestAccessAsync();
 
     /// <summary>
+    /// True when the library is usable now (full or partial access). It only looks and never asks
+    /// the user, so a reload the user didn't ask for can find out that access was given meanwhile,
+    /// in the system settings.
+    /// </summary>
+    Task<bool> HasAccessAsync();
+
+    /// <summary>
     /// True when the user granted access to selected photos only (Android 14+), so the app sees
     /// just those until the user adds more (<see cref="SelectMorePhotosAsync"/>).
     /// </summary>
@@ -68,25 +75,42 @@ public interface IPhotoLibraryService
     Task<string?> ComputeContentHashAsync(string photoId, CancellationToken ct = default);
 
     /// <summary>
-    /// Moves photos to the system trash (Android 11+) or "Recently Deleted" (iOS), where the OS
-    /// purges them after ~30 days. Shows the platform consent dialog for the ones the library still
-    /// has. True once the library has none of them, also when some had gone already (into the
-    /// trash, or for good). Android 11+ checks that afterwards, as its dialog reports success
-    /// either way; false then means the user said no, or not every one went (some may have).
-    /// Android 10 has no system trash: there they are deleted for good, through the folders the
-    /// user opens for the app in the system folder picker (once per folder). True means every one
-    /// is gone. False means not every one is: the user backed out of the folder picker (then none
-    /// is deleted), or a file couldn't be deleted (the others still are).
+    /// Whether <see cref="ComputeContentHashAsync"/> can read the files as they are. Android hands
+    /// an app the photos and videos it didn't create with where they were taken blanked out,
+    /// unless the app holds ACCESS_MEDIA_LOCATION, which comes with full photo access and never
+    /// with "selected photos only". A hash of such a file would call two files identical that
+    /// differ only in their location, so without it Android hashes nothing. Always true on iOS.
     /// </summary>
-    Task<bool> MoveToSystemTrashAsync(IReadOnlyList<string> photoIds);
+    Task<bool> ReadsOriginalBytesAsync();
 
     /// <summary>
-    /// Restores items out of the system trash (Android 11+ only, see <see cref="CanRestoreFromSystemTrash"/>),
-    /// asking only for the ones still in it. True once each of those is back in the library (Android
-    /// checks afterwards, as its dialog reports success either way), also when none was left to
-    /// restore: purged from the trash elsewhere, or on a card that isn't mounted.
+    /// Moves photos to the system trash (Android 11+) or "Recently Deleted" (iOS), where the OS
+    /// purges them after ~30 days, showing the platform consent dialog for the ones the library
+    /// still has. Android 10 has no system trash: there they are deleted for good, through the
+    /// folders the user opens for the app in the system folder picker (once per folder; backing
+    /// out of it deletes none, while a file that can't be deleted doesn't keep the others).
+    /// <para>
+    /// The result says what became of each item, and only its <see cref="TrashResult.Removed"/>
+    /// may be recorded as removed: the ones found in the system trash afterwards (Android's dialog
+    /// reports success either way, so the library is asked), or deleted and checked gone. An item
+    /// the library merely no longer lists is not among them: it may be on an SD card that has been
+    /// taken out (<see cref="TrashResult.Unreachable"/>), or have been removed by something else
+    /// (<see cref="TrashResult.Missing"/>).
+    /// </para>
+    /// <paramref name="knownVolumes"/> gives the storage volume each item was on when it went to
+    /// the bin (<see cref="PhotoAsset.VolumeName"/>), for the items that is known for.
     /// </summary>
-    Task<bool> RestoreFromSystemTrashAsync(IReadOnlyList<string> photoIds);
+    Task<TrashResult> MoveToSystemTrashAsync(
+        IReadOnlyList<string> photoIds, IReadOnlyDictionary<string, string> knownVolumes);
+
+    /// <summary>
+    /// Restores an item out of the system trash (Android 11+ only, see <see cref="CanRestoreFromSystemTrash"/>),
+    /// asking the user only when it is still in it, and says where the item is afterwards (Android
+    /// checks, as its dialog reports success either way). <paramref name="knownVolume"/> is the
+    /// storage volume it was on when it went to the bin, when that is known: an item on an SD card
+    /// that isn't mounted is <see cref="RestoreOutcome.Unreachable"/>, not gone.
+    /// </summary>
+    Task<RestoreOutcome> RestoreFromSystemTrashAsync(string photoId, string? knownVolume);
 
     /// <summary>
     /// Photo ids belonging to a folder/album (<paramref name="folderId"/> is <see cref="AlbumInfo.Id"/>:

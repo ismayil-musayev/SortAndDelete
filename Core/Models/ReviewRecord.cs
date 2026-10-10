@@ -26,4 +26,12 @@ public sealed class ReviewRecord
 
     /// <summary>Album name for <see cref="SwipeDecision.Moved"/> decisions.</summary>
     public string? TargetAlbum { get; set; }
+
+    /// <summary>
+    /// The storage volume the photo was on when it went to the bin (<see cref="PhotoAsset.VolumeName"/>),
+    /// so that emptying the bin can tell a photo on an SD card that has been taken out, which the
+    /// library no longer lists, from one that is gone. Null for other decisions, on iOS, and in
+    /// records written before this was kept.
+    /// </summary>
+    public string? VolumeName { get; set; }
 }

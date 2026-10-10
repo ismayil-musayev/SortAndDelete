@@ -24,9 +24,20 @@ public class HashAdoptionTests
         SizeBytes = size,
     };
 
-    /// <summary>A hash cached before rows carried the file's stamp, as it reads back now.</summary>
+    /// <summary>
+    /// A hash cached before rows carried the file's stamp, as it reads back now, and known to be of
+    /// the file's own bytes: the stamp is the only thing in doubt.
+    /// </summary>
     private static ContentHashRecord Unstamped(string id, string hash, long size = 5_000_000) =>
-        new() { PhotoId = id, SizeBytes = size, Hash = hash };
+        new() { PhotoId = id, SizeBytes = size, Hash = hash, Original = true };
+
+    /// <summary>
+    /// A hash cached before rows said whether they were of the file's own bytes, as it reads back
+    /// now: stamped, as the version before this one wrote it, but perhaps of a file Android handed
+    /// over with its location blanked.
+    /// </summary>
+    private static ContentHashRecord Unproven(PhotoAsset file, string hash) =>
+        new() { PhotoId = file.Id, SizeBytes = file.SizeBytes, FileModifiedAtTicks = file.FileModifiedAt.Ticks, Hash = hash };
 
     private static HashAdoption Adopt(IReadOnlyList<PhotoAsset> collisions, params ContentHashRecord[] rows) =>
         HashAdoption.For(collisions, rows.ToDictionary(row => row.PhotoId, StringComparer.Ordinal));
@@ -153,6 +164,75 @@ public class HashAdoptionTests
             Unstamped("1", "ABC"), Unstamped("2", "ABC"), Unstamped("3", "DEF"));
 
         Assert.Equal(["1", "2", "3"], Ids(adoption.Reread));
+        Assert.Empty(adoption.Adopted);
+    }
+
+    /// <summary>
+    /// The case the mark exists for: two files hashed without ACCESS_MEDIA_LOCATION that differ
+    /// only in where they were taken, so their hashes are equal. Only the originals can say
+    /// whether they are identical.
+    /// </summary>
+    [Fact]
+    public void Twins_hashed_before_rows_said_they_were_of_the_original_are_read_again()
+    {
+        var first = File("1");
+        var second = File("2");
+
+        var adoption = Adopt([first, second], Unproven(first, "ABC"), Unproven(second, "ABC"));
+
+        Assert.Equal(["1", "2"], Ids(adoption.Reread));
+        Assert.Empty(adoption.Adopted);
+    }
+
+    /// <summary>
+    /// A hash of the original is not in doubt, so of a pair only the unproven one is read. Until
+    /// it has been, the pair proves nothing.
+    /// </summary>
+    [Fact]
+    public void Of_a_proven_and_an_unproven_twin_only_the_unproven_one_is_read_again()
+    {
+        var first = File("1");
+        var second = File("2");
+
+        var adoption = Adopt([first, second], ContentHashRecord.From(first, "ABC"), Unproven(second, "ABC"));
+
+        Assert.Equal(["2"], Ids(adoption.Reread));
+        Assert.Empty(adoption.Adopted);
+    }
+
+    /// <summary>
+    /// An unproven hash nothing shares costs no read after the update, and is not adopted either:
+    /// marked as of the original, it could later equal the hash of a copy that has no location,
+    /// and call the two identical. It stays as it is, proving nothing.
+    /// </summary>
+    [Fact]
+    public void An_unproven_hash_that_matches_nothing_is_neither_read_nor_adopted()
+    {
+        var first = File("1");
+        var second = File("2");
+
+        var adoption = Adopt([first, second], Unproven(first, "ABC"), Unproven(second, "DEF"));
+
+        Assert.Empty(adoption.Reread);
+        Assert.Empty(adoption.Adopted);
+    }
+
+    /// <summary>
+    /// A file of the length read anyway could be the copy without a location of what an unproven
+    /// hash describes, so every unproven hash of the length is read with it.
+    /// </summary>
+    [Fact]
+    public void A_file_being_read_puts_the_unproven_hashes_of_its_length_in_doubt()
+    {
+        var first = File("1");
+        var other = File("3", size: 6_000_000);
+        var beside = File("4", size: 6_000_000);
+
+        var adoption = Adopt(
+            [first, File("2"), other, beside], // 2 has no hash yet
+            Unproven(first, "ABC"), Unproven(other, "DEF"), ContentHashRecord.From(beside, "GHI"));
+
+        Assert.Equal(["1"], Ids(adoption.Reread));
         Assert.Empty(adoption.Adopted);
     }
 

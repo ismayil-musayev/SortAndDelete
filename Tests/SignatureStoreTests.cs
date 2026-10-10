@@ -164,6 +164,40 @@ public sealed class SignatureStoreTests : IAsyncLifetime
         Assert.True(hash.IsCurrentFor(Photo(fileModifiedAt: Written)));
     }
 
+    /// <summary>
+    /// The hashes also gain the mark that says they are of the file's own bytes. A row from
+    /// before reads back without it, whichever version wrote it: nothing says whether Android
+    /// had blanked the file's location when it was hashed, so it proves nothing until read again.
+    /// </summary>
+    [Fact]
+    public async Task Hashes_cached_before_the_upgrade_read_back_as_not_known_to_be_of_the_original()
+    {
+        CreateCacheAs30LeftIt();
+        var store = Open();
+
+        var hash = (await store.GetContentHashesAsync())["42"];
+
+        // Added rather than just missing, so the false below is the old row's NULL read back.
+        Assert.Contains(nameof(ContentHashRecord.Original), ColumnsOf("content_hashes"));
+        Assert.False(hash.Original);
+        Assert.True(hash.IsCurrentFor(Photo()));
+        Assert.False(hash.ProvesIdentityOf(Photo()));
+    }
+
+    [Fact]
+    public async Task An_upgraded_cache_keeps_the_mark_of_hashes_taken_of_the_original()
+    {
+        CreateCacheAs30LeftIt();
+        var store = Open();
+        var file = Photo(fileModifiedAt: Written);
+
+        await store.SaveContentHashesAsync([ContentHashRecord.From(file, "DEF")]);
+
+        var hash = (await store.GetContentHashesAsync())["42"];
+        Assert.True(hash.Original);
+        Assert.True(hash.ProvesIdentityOf(file));
+    }
+
     [Fact]
     public async Task An_upgraded_cache_keeps_the_stamp_of_new_hashes()
     {

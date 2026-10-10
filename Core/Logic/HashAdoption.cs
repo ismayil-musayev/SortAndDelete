@@ -23,6 +23,12 @@ namespace SortAndDelete.Logic;
 /// unstamped and the item out of that scan's identical files, and the next scan decides about it
 /// afresh: it is read again for as long as its hash could still make a pair. An unreadable file
 /// with no hash at all gets the same, being tried on every scan while it shares a length.
+///
+/// The same goes for the hashes not known to be of the file's own bytes
+/// (<see cref="ContentHashRecord.Original"/>): cached before rows said so, when Android may have
+/// handed over the file with its location blanked. They are read again in the same two cases.
+/// Otherwise they are left as they are rather than adopted: such a hash proves nothing, and taken
+/// at its word it could later equal the hash of a copy that really has no location.
 /// </summary>
 /// <remarks>
 /// The first case is the narrower on purpose, though its files are read too. A new file's hash
@@ -50,8 +56,11 @@ public sealed record HashAdoption(IReadOnlyList<ContentHashRecord> Adopted, IRea
                     reading = true; // no hash yet, or a stale one: the scan reads this file
             }
 
-            var unstamped = current.Where(item => item.Row.NeedsStampFrom(item.Photo)).ToList();
-            if (unstamped.Count == 0)
+            // In doubt: never checked against the file as it is now, or perhaps not of its own bytes.
+            var inDoubt = current
+                .Where(item => !item.Row.Original || item.Row.NeedsStampFrom(item.Photo))
+                .ToList();
+            if (inDoubt.Count == 0)
                 continue;
 
             // Two current hashes alike claim an identical pair, which for an unstamped one of
@@ -62,11 +71,11 @@ public sealed record HashAdoption(IReadOnlyList<ContentHashRecord> Adopted, IRea
                 .Select(same => same.Key)
                 .ToHashSet(StringComparer.Ordinal);
 
-            foreach (var (photo, row) in unstamped)
+            foreach (var (photo, row) in inDoubt)
             {
                 if (reading || shared.Contains(row.Hash))
                     reread.Add(photo);
-                else
+                else if (row.Original)
                     adopted.Add(ContentHashRecord.From(photo, row.Hash));
             }
         }

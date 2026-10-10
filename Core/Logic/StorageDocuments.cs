@@ -86,14 +86,22 @@ public static class StorageDocuments
     /// own spelling, which is the provider's: it checks that a document lies inside the tree by
     /// comparing paths as written (see <see cref="MoveRouting.FolderDocumentId"/>). The rest is
     /// the document's.
+    /// <para>
+    /// Android 10 answers a pick of internal storage's Documents folder, or of a folder inside it,
+    /// with a grant of the provider's Documents root, never of "primary:Documents": "home:" for
+    /// Documents and "home:Scans" for Documents/Scans (see <see cref="MoveRouting.TryLocateDocumentId"/>).
+    /// Such a grant covers the files there like any other, and names them in its own root:
+    /// "primary:Documents/Scans/a.jpg" is "home:Scans/a.jpg" inside either.
+    /// </para>
     /// </summary>
     public static string? DocumentIdInGrant(string treeDocumentId, string documentId)
     {
-        if (!MoveRouting.TrySplitDocumentId(treeDocumentId, out var grantVolume, out _) ||
-            !MoveRouting.TrySplitDocumentId(documentId, out var volume, out var path) ||
+        if (!MoveRouting.TryLocateDocumentId(treeDocumentId, out var grantVolume, out _) ||
+            !MoveRouting.TryLocateDocumentId(documentId, out var volume, out var path) ||
             !grantVolume.Equals(volume, StringComparison.OrdinalIgnoreCase) ||
-            MoveRouting.Segments(path) is not { Length: > 0 } segments)
-            return null;
+            MoveRouting.Segments(path) is not { Length: > 0 } segments ||
+            segments.Any(segment => segment is "." or ".."))
+            return null; // a path that steps out of a folder names nothing a grant can be said to cover
 
         var folder = string.Join('/', segments[..^1]) + "/";
         return MoveRouting.GrantCovers(treeDocumentId, folder)

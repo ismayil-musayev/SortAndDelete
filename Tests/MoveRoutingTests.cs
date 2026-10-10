@@ -236,4 +236,105 @@ public class MoveRoutingTests
     public void Browsed_folders_follow_the_gallery_rules(string tree, string sourceVolume, string sourceFolder,
         MediaKind kind, bool videosInPictures, BrowsedRoute expected) =>
         Assert.Equal(expected, MoveRouting.RouteForBrowsed(tree, sourceVolume, sourceFolder, kind, videosInPictures));
+
+    // Android 10's folder picker answers a pick of internal storage's Documents folder, or of one
+    // inside it, with the provider's Documents root: "home:" and "home:Scans".
+
+    [Theory]
+    [InlineData("home:", "primary", "Documents")]
+    [InlineData("home:Scans", "primary", "Documents/Scans")]
+    [InlineData("home:Scans/2024/a.jpg", "primary", "Documents/Scans/2024/a.jpg")]
+    [InlineData("primary:Documents/Scans", "primary", "Documents/Scans")]
+    [InlineData("primary:", "primary", "")]
+    [InlineData("1A2B-3C4D:Documents", "1A2B-3C4D", "Documents")]
+    public void A_document_id_says_where_the_document_is(string documentId, string volume, string path)
+    {
+        Assert.True(MoveRouting.TryLocateDocumentId(documentId, out var foundVolume, out var foundPath));
+        Assert.Equal(volume, foundVolume);
+        Assert.Equal(path, foundPath);
+    }
+
+    [Theory]
+    [InlineData("not-a-document-id")]
+    [InlineData(":DCIM")]
+    [InlineData("")]
+    public void What_is_no_document_id_is_nowhere(string documentId) =>
+        Assert.False(MoveRouting.TryLocateDocumentId(documentId, out _, out _));
+
+    [Theory]
+    [InlineData("home:", "Documents/", true)]
+    [InlineData("home:", "documents/Scans/", true)]
+    [InlineData("home:Scans", "Documents/Scans/", true)]
+    [InlineData("home:Scans", "Documents/Scans/2024/", true)]
+    [InlineData("home:scans", "Documents/Scans/", true)]
+    // not the top of the storage: it covers nothing outside Documents
+    [InlineData("home:", "Bluetooth/", false)]
+    [InlineData("home:", "DCIM/Camera/", false)]
+    [InlineData("home:", "/", false)]
+    [InlineData("home:Scans", "Scans/", false)]
+    [InlineData("home:Scans", "Documents/", false)]
+    [InlineData("home:Scans", "Documents/Other/", false)]
+    public void A_grant_of_the_Documents_root_covers_Documents_only(string tree, string folder, bool covers) =>
+        Assert.Equal(covers, MoveRouting.GrantCovers(tree, folder));
+
+    [Theory]
+    [InlineData("home:", "Documents/", "home:")]
+    [InlineData("home:", "Documents/Scans/", "home:Scans")]
+    [InlineData("home:Scans", "Documents/Scans/", "home:Scans")]
+    [InlineData("home:Scans", "Documents/Scans/2024/", "home:Scans/2024")]
+    [InlineData("home:scans", "documents/Scans/2024/", "home:scans/2024")]
+    public void A_folder_inside_the_Documents_root_is_named_in_that_root(string tree, string folder, string expected) =>
+        Assert.Equal(expected, MoveRouting.FolderDocumentId(tree, folder));
+
+    [Fact]
+    public void No_folder_document_outside_the_Documents_root()
+    {
+        Assert.Null(MoveRouting.FolderDocumentId("home:", "Bluetooth/"));
+        Assert.Null(MoveRouting.FolderDocumentId("home:Scans", "Scans/"));
+    }
+
+    [Theory]
+    [InlineData("home:", "Documents/")]
+    [InlineData("home:Scans", "Documents/Scans/")]
+    [InlineData("home:Scans/2024/", "Documents/Scans/2024/")]
+    public void The_Documents_root_names_its_folder_under_Documents(string tree, string expected)
+    {
+        Assert.Equal(expected, MoveRouting.RelativePathOfGrant(tree));
+        Assert.True(MoveRouting.IsGrantFor(tree, expected));
+        Assert.False(MoveRouting.IsAppFolderGrant(tree));
+    }
+
+    [Theory]
+    [InlineData("home:", true)]
+    [InlineData("home:Scans", true)]
+    [InlineData("primary:DCIM", true)]
+    [InlineData("PRIMARY:DCIM", true)]
+    [InlineData("1A2B-3C4D:Documents", false)]
+    [InlineData("not-a-document-id", false)]
+    public void The_Documents_root_is_on_internal_storage(string tree, bool isInternal)
+    {
+        Assert.Equal(isInternal, MoveRouting.IsOnInternalStorage(tree));
+        Assert.Equal(isInternal, MoveRouting.IsSameVolume(tree, Internal));
+        if (isInternal)
+            Assert.False(MoveRouting.IsSameVolume(tree, SdCard));
+    }
+
+    [Theory]
+    // Documents takes a copy through MediaStore, as when it is picked as "primary:Documents"
+    [InlineData("home:", Internal, "DCIM/Camera/", MediaKind.Image, Android11, BrowsedRoute.FilesCopy)]
+    [InlineData("home:Scans", SdCard, "DCIM/", MediaKind.Video, Android11, BrowsedRoute.FilesCopy)]
+    // never taken for the top of the storage, which is refused outright
+    [InlineData("home:", Internal, "DCIM/Camera/", MediaKind.Image, Android10, BrowsedRoute.FilesCopy)]
+    // the folder it is in already
+    [InlineData("home:", Internal, "Documents/", MediaKind.Image, Android11, BrowsedRoute.AlreadyThere)]
+    [InlineData("home:Scans", Internal, "documents/scans/", MediaKind.Image, Android11, BrowsedRoute.AlreadyThere)]
+    public void A_browsed_Documents_root_routes_as_Documents(string tree, string sourceVolume, string sourceFolder,
+        MediaKind kind, bool videosInPictures, BrowsedRoute expected) =>
+        Assert.Equal(expected, MoveRouting.RouteForBrowsed(tree, sourceVolume, sourceFolder, kind, videosInPictures));
+
+    [Theory]
+    [InlineData("home:", MediaKind.Image)]
+    [InlineData("home:Scans", MediaKind.Video)]
+    public void On_Android_10_a_move_into_the_Documents_root_would_be_a_copy(string tree, MediaKind kind) =>
+        Assert.Equal(MoveRoute.Copy, MoveRouting.RouteFor(MoveRouting.RelativePathOfGrant(tree), kind, Android10));
 }

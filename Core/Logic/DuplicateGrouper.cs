@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using SortAndDelete.Models;
 
 namespace SortAndDelete.Logic;
@@ -265,7 +266,39 @@ public static class DuplicateGrouper
             Items = [keeper, .. photos.Where(p => p.Id != keeper.Id)],
             Keeper = keeper,
             IsExact = isExact,
+            SameSizeLookalikes = isExact ? FrozenSet<string>.Empty : SameSizeLookalikes(members),
         };
+    }
+
+    /// <summary>
+    /// The members that share their pixel size with another member (see
+    /// <see cref="DuplicateGroup.SameSizeLookalikes"/>), unless all of that size are identical
+    /// files of one another, and those whose size isn't known. Measured: two 1200x900 pictures
+    /// with one background and different labels sat 1 to 2 bits apart in the gradient hash and 2
+    /// to 6 in the coarse one, with the same colours, and one form screen with other values 4 to
+    /// 8 and 2 to 8. Re-encoded photographs sit as far apart (up to 9 and 6), so no threshold
+    /// separates the two; the size does, for pictures from one source.
+    /// </summary>
+    private static IReadOnlySet<string> SameSizeLookalikes(List<ScannedPhoto> members)
+    {
+        // A member of unknown size may be the size of any other: nothing then says that any of
+        // them is a resized copy, so none is ticked.
+        if (members.Any(m => m.Photo.Width <= 0 || m.Photo.Height <= 0))
+            return members.Select(m => m.Photo.Id).ToHashSet(StringComparer.Ordinal);
+
+        var lookalikes = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var size in members.GroupBy(m => (m.Photo.Width, m.Photo.Height)))
+        {
+            bool identical = TrustedHash(size.First()) is { } first
+                && size.All(m => string.Equals(TrustedHash(m), first, StringComparison.Ordinal));
+
+            if (size.Count() > 1 && !identical)
+            {
+                foreach (var member in size)
+                    lookalikes.Add(member.Photo.Id);
+            }
+        }
+        return lookalikes;
     }
 
     /// <summary>

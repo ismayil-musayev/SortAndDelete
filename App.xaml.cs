@@ -1,6 +1,7 @@
 using SortAndDelete.Logic;
 using SortAndDelete.Services;
 using SortAndDelete.ViewModels;
+using SortAndDelete.Views;
 
 namespace SortAndDelete;
 
@@ -36,6 +37,7 @@ public partial class App : Application
 		{
 			OnWindowStarted(window);
 			await ReloadForLibraryChangeAsync([window]);
+			await TellPageAppResumedAsync(window);
 		};
 
 		// While a window is started, from here or OnRestart (Resumed) to OnStop (Stopped), the
@@ -68,6 +70,30 @@ public partial class App : Application
 		// in it, as the loads after the app's own moves and trash requests do.
 		if (ChangeDebounce.NeedsReload(e.LastNotifiedAt, _gallery.LoadStartedAt))
 			await ReloadForLibraryChangeAsync([.. _startedWindows]);
+	}
+
+	/// <summary>
+	/// Tells the page that is up in <paramref name="window"/> that the app has come back, if it looks
+	/// again then (<see cref="IResumeAware"/>). From here rather than from the page's own handler of
+	/// <see cref="Window.Resumed"/>, for two reasons. The page hears it after the gallery was marked
+	/// stale just above, whatever order handlers were added in, so its look reads the library again.
+	/// And a page pushed by a Shell route can't add that handler when it appears: Shell raises its
+	/// OnAppearing from the page's ParentSet event, which Element.OnParentSet raises before it hands
+	/// the page its <see cref="VisualElement.Window"/>, so the page's Window is still null there.
+	/// </summary>
+	private static async Task TellPageAppResumedAsync(Window window)
+	{
+		if (window.Page is not Shell { CurrentPage: IResumeAware page })
+			return;
+
+		try
+		{
+			await page.OnAppResumedAsync();
+		}
+		catch (Exception)
+		{
+			// This runs from an event handler, where a throw would close the app.
+		}
 	}
 
 	/// <summary>

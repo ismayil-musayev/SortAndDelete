@@ -12,7 +12,10 @@ namespace SortAndDelete.Logic;
 /// Download/ and Documents/. Every other folder is reachable only through the system folder
 /// picker, which from Android 11 refuses the storage root and Download/ itself (Android 10's
 /// offers both). Folder grants are ExternalStorageProvider tree document ids: "primary:Bluetooth"
-/// is Bluetooth/ on internal storage, "1A2B-3C4D:DCIM" is DCIM/ on that SD card.
+/// is Bluetooth/ on internal storage, "1A2B-3C4D:DCIM" is DCIM/ on that SD card. Android 10's
+/// provider also has a root of its own for internal storage's Documents folder: there the picker
+/// answers "home:" for Documents/ and "home:Scans" for Documents/Scans/, never "primary:Documents"
+/// (see <see cref="TryLocateDocumentId"/>).
 /// </summary>
 public static class MoveRouting
 {
@@ -104,7 +107,7 @@ public static class MoveRouting
     /// </summary>
     public static bool GrantCovers(string treeDocumentId, string relativePath)
     {
-        if (!TrySplitDocumentId(treeDocumentId, out _, out var treePath))
+        if (!TryLocateDocumentId(treeDocumentId, out _, out var treePath))
             return false;
 
         var granted = Segments(treePath);
@@ -125,32 +128,36 @@ public static class MoveRouting
     /// covers it ("primary:Bluetooth" and "Bluetooth/2024/" give "primary:Bluetooth/2024"), or
     /// null when the grant doesn't cover it. The covered part keeps the grant's own spelling:
     /// the provider checks that a document lies inside the tree by comparing paths as written.
+    /// And the grant's own root: inside a grant of the Documents root ("home:Scans"),
+    /// Documents/Scans/2024/ is "home:Scans/2024".
     /// </summary>
     public static string? FolderDocumentId(string treeDocumentId, string relativePath)
     {
         if (!GrantCovers(treeDocumentId, relativePath) ||
-            !TrySplitDocumentId(treeDocumentId, out var volume, out var treePath))
+            !TrySplitDocumentId(treeDocumentId, out var root, out var pathInRoot) ||
+            !TryLocateDocumentId(treeDocumentId, out _, out var treePath))
             return null;
 
         var below = Segments(relativePath).Skip(Segments(treePath).Length);
-        var path = string.Join('/', Segments(treePath).Concat(below));
-        return $"{volume}:{path}";
+        var path = string.Join('/', Segments(pathInRoot).Concat(below));
+        return $"{root}:{path}";
     }
 
     /// <summary>Whether a folder grant is for exactly the folder at <paramref name="relativePath"/>.</summary>
     public static bool IsGrantFor(string treeDocumentId, string relativePath) =>
-        TrySplitDocumentId(treeDocumentId, out _, out var treePath) && IsSameFolder(treePath, relativePath);
+        TryLocateDocumentId(treeDocumentId, out _, out var treePath) && IsSameFolder(treePath, relativePath);
 
     /// <summary>Whether a folder grant is for an app folder (see <see cref="IsAppFolder"/>).</summary>
     public static bool IsAppFolderGrant(string treeDocumentId) =>
-        TrySplitDocumentId(treeDocumentId, out _, out var treePath) && IsAppFolder(treePath);
+        TryLocateDocumentId(treeDocumentId, out _, out var treePath) && IsAppFolder(treePath);
 
     /// <summary>
     /// The relative path of the folder a grant is for: "primary:Pictures/Trips" gives
-    /// "Pictures/Trips/", and the top of a volume ("primary:", "1A2B-3C4D:") gives "".
+    /// "Pictures/Trips/", the Documents root ("home:", "home:Scans") gives "Documents/" and
+    /// "Documents/Scans/", and the top of a volume ("primary:", "1A2B-3C4D:") gives "".
     /// </summary>
     public static string RelativePathOfGrant(string treeDocumentId) =>
-        TrySplitDocumentId(treeDocumentId, out _, out var treePath) && Segments(treePath) is { Length: > 0 } folders
+        TryLocateDocumentId(treeDocumentId, out _, out var treePath) && Segments(treePath) is { Length: > 0 } folders
             ? string.Join('/', folders) + "/"
             : "";
 
@@ -160,13 +167,21 @@ public static class MoveRouting
     /// </summary>
     public static bool IsSameVolume(string treeDocumentId, string mediaStoreVolume)
     {
-        if (!TrySplitDocumentId(treeDocumentId, out var volume, out _))
+        if (!TryLocateDocumentId(treeDocumentId, out var volume, out _))
             return false;
 
         return volume.Equals(InternalStorageVolume, StringComparison.OrdinalIgnoreCase)
             ? mediaStoreVolume is "external_primary" or "external"
             : volume.Equals(mediaStoreVolume, StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Whether a grant is for a folder on internal storage ("primary:DCIM", or the Documents root's
+    /// "home:Scans") rather than on an SD card. False for anything that is no document id.
+    /// </summary>
+    public static bool IsOnInternalStorage(string treeDocumentId) =>
+        TryLocateDocumentId(treeDocumentId, out var volume, out _) &&
+        volume.Equals(InternalStorageVolume, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// How an item moves into a folder picked in the system folder browser, by the folder's grant
@@ -179,7 +194,7 @@ public static class MoveRouting
     public static BrowsedRoute RouteForBrowsed(string treeDocumentId, string sourceVolume, string sourceRelativePath,
         MediaKind kind, bool videosAllowedInPictures)
     {
-        if (!TrySplitDocumentId(treeDocumentId, out var volume, out _))
+        if (!TryLocateDocumentId(treeDocumentId, out var volume, out _))
             return BrowsedRoute.NotPossible;
 
         var relativePath = RelativePathOfGrant(treeDocumentId);
@@ -207,6 +222,39 @@ public static class MoveRouting
     /// <summary>The volume of internal storage in a tree document id ("primary:DCIM").</summary>
     internal const string InternalStorageVolume = "primary";
 
+    /// <summary>
+    /// The storage provider's root for internal storage's Documents folder, which Android 10 has
+    /// beside the volumes' own: "home:" is Documents/ and "home:Scans/a.jpg" is Documents/Scans/a.jpg
+    /// on internal storage. The folder picker answers with it whenever the user picks Documents or
+    /// a folder inside it there, whichever way they got to it.
+    /// </summary>
+    internal const string DocumentsRoot = "home";
+
+    private const string DocumentsFolder = "Documents";
+
+    /// <summary>
+    /// Where a document or a folder grant is: its volume ("primary", or an SD card's "1A2B-3C4D")
+    /// and its path on that volume. "primary:DCIM/a.jpg" is DCIM/a.jpg on "primary", and the
+    /// Documents root's "home:Scans/a.jpg" is Documents/Scans/a.jpg on "primary" too. False for
+    /// anything that is no document id.
+    /// </summary>
+    public static bool TryLocateDocumentId(string documentId, out string volume, out string path)
+    {
+        if (!TrySplitDocumentId(documentId, out volume, out path))
+            return false;
+
+        if (volume == DocumentsRoot)
+        {
+            volume = InternalStorageVolume;
+            path = string.Join('/', Segments(path).Prepend(DocumentsFolder));
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Splits a document id as written: the provider's root ("primary", "1A2B-3C4D", "home") and the
+    /// path inside that root. To compare places, use <see cref="TryLocateDocumentId"/>.
+    /// </summary>
     internal static bool TrySplitDocumentId(string documentId, out string volume, out string path)
     {
         int colon = documentId.IndexOf(':');

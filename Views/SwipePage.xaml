@@ -35,26 +35,36 @@
         <!-- ===== Card deck ===== -->
         <Grid Grid.Row="2" x:Name="DeckArea" Margin="18,10">
 
-            <!-- Back card (next photo peeking through) -->
+            <!-- Back card (next photo peeking through). Its picture is put on it from code,
+                 as the front card's is. -->
             <Border x:Name="BackCard"
                     IsVisible="{Binding IsDone, Converter={StaticResource InvertedBool}}"
                     BackgroundColor="{StaticResource Surface}"
                     StrokeThickness="0" StrokeShape="RoundRectangle 26"
                     Scale="0.94" TranslationY="16" Opacity="0.7">
-                <Image Source="{Binding NextImage}" Aspect="AspectFit" />
+                <Image x:Name="BackImage" Aspect="AspectFit" />
             </Border>
 
-            <!-- Front card (the one being swiped) -->
+            <!-- Front card (the one being swiped). Off until a photo is put on it: the page
+                 brings it up with the photo's picture, in the step the view model sets the
+                 labels below (SwipePage.ShowCard), so picture and label always go together. -->
             <Border x:Name="FrontCard"
                     IsVisible="{Binding IsDone, Converter={StaticResource InvertedBool}}"
                     BackgroundColor="{StaticResource Surface}"
                     StrokeThickness="0" StrokeShape="RoundRectangle 26"
-                    AnchorY="0.85">
+                    AnchorY="0.85" Opacity="0">
                 <Border.GestureRecognizers>
                     <TapGestureRecognizer NumberOfTapsRequired="2" Tapped="OnCardDoubleTapped" />
                 </Border.GestureRecognizers>
                 <Grid>
-                    <Image x:Name="CardImage" Source="{Binding CurrentImage}" Aspect="AspectFit" />
+                    <Image x:Name="CardImage" Aspect="AspectFit" />
+
+                    <!-- A file nothing can make a picture of: said, rather than left looking
+                         like a card whose picture is still on its way -->
+                    <Label Text="No preview for this file"
+                           IsVisible="{Binding IsPictureMissing}"
+                           FontSize="14" TextColor="{StaticResource TextSecondary}"
+                           HorizontalOptions="Center" VerticalOptions="Center" />
 
                     <!-- Date + file/location badge -->
                     <Border BackgroundColor="#B3000000" StrokeThickness="0"
@@ -157,6 +167,8 @@
         </Grid>
 
         <!-- ===== Action buttons ===== -->
+        <!-- The four that act on the card note when their press began (Pressed): a press decides
+             the photo that was on the card then, and only if it had been there to be seen. -->
         <Grid Grid.Row="3" IsVisible="{Binding IsDone, Converter={StaticResource InvertedBool}}"
               ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto,*" ColumnSpacing="14" Padding="0,10,0,0">
 
@@ -165,22 +177,22 @@
                     BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource WarnAmber}"
                     VerticalOptions="Center" />
 
-            <Button Grid.Column="2" Text="✕" Clicked="OnDeleteClicked"
+            <Button Grid.Column="2" Text="✕" Clicked="OnDeleteClicked" Pressed="OnDeckButtonPressed"
                     FontSize="26" WidthRequest="66" HeightRequest="66" CornerRadius="33" Padding="0"
                     BackgroundColor="{StaticResource DangerRed}" TextColor="White"
                     VerticalOptions="Center" />
 
-            <Button Grid.Column="3" Text="»" Clicked="OnLaterClicked"
+            <Button Grid.Column="3" Text="»" Clicked="OnLaterClicked" Pressed="OnDeckButtonPressed"
                     FontSize="24" WidthRequest="48" HeightRequest="48" CornerRadius="24" Padding="0,0,0,4"
                     BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextSecondary}"
                     VerticalOptions="Center" />
 
-            <Button Grid.Column="4" Text="✓" Clicked="OnKeepClicked"
+            <Button Grid.Column="4" Text="✓" Clicked="OnKeepClicked" Pressed="OnDeckButtonPressed"
                     FontSize="26" WidthRequest="66" HeightRequest="66" CornerRadius="33" Padding="0"
                     BackgroundColor="{StaticResource KeepGreen}" TextColor="White"
                     VerticalOptions="Center" />
 
-            <Button Grid.Column="5" Text="📁" Clicked="OnAlbumClicked"
+            <Button Grid.Column="5" Text="📁" Clicked="OnAlbumClicked" Pressed="OnDeckButtonPressed"
                     FontSize="18" WidthRequest="48" HeightRequest="48" CornerRadius="24" Padding="0"
                     BackgroundColor="{StaticResource Surface}" TextColor="{StaticResource TextPrimary}"
                     VerticalOptions="Center" />
