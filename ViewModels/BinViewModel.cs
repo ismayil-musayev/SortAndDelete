@@ -124,8 +124,12 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
         try
         {
             var ok = await gallery.Library.RestoreFromSystemTrashAsync([item.PhotoId]);
+            // False: the user denied the system dialog, or Android didn't restore it (its dialog reports
+            // success either way, so the service checks the gallery); it stays listed. True also when
+            // nothing was left to restore (purged from the trash elsewhere, or on a card that isn't
+            // mounted), so the entry goes.
             if (!ok)
-                return; // user denied the system dialog
+                return;
 
             await gallery.Store.RemoveAsync(item.PhotoId); // unreviewed again
             CommittedItems.Remove(item);
@@ -146,7 +150,9 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
 
         string message = SystemTrash
             ? $"Move {Items.Count} item(s) to the system trash? They will be permanently deleted by the system after ~30 days. Until then you can still get them back from the system trash (Android) or Photos → Recently Deleted (iOS)."
-            : $"Permanently delete {Items.Count} item(s)? Your device has no system trash — this CANNOT be undone.";
+            : $"Permanently delete {Items.Count} item(s)? Your device has no system trash — this CANNOT be undone. " +
+              "Android may ask you for access to the folders they are in, once per folder: on the next screen, " +
+              "allow access to the folder it opens on.";
 
         bool confirmed = await Shell.Current.DisplayAlertAsync("Empty bin", message,
             SystemTrash ? "Move to trash" : "Delete forever", "Cancel");
@@ -159,7 +165,30 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
             var ids = Items.Select(i => i.PhotoId).ToList();
             var ok = await gallery.Library.MoveToSystemTrashAsync(ids);
             if (!ok)
-                return; // user denied the system dialog — everything stays in the bin
+            {
+                // Not every item went. Android 11+: the user denied the system dialog, Android didn't
+                // trash every item (its dialog reports success either way, so the service checks the
+                // gallery), or the dialog closed without reporting what it had done (a rotation can do
+                // that); nothing here says which, so nothing to explain. Android 10: the user backed out
+                // of the folder picker, or a file couldn't be deleted (the others were). Either way some
+                // may have gone, and an item left pending after it went would only be forgotten by ↺
+                // while Android purges it. So what the library no longer has (in the system trash,
+                // deleted, or otherwise gone) is committed, and the rest stays in the bin. iOS: the user
+                // denied the dialog, so nothing left the library and nothing changes.
+#if ANDROID
+                var library = await gallery.GetPhotosAsync(refresh: true);
+                var gone = ids.Except(library.Select(p => p.Id)).ToList();
+                if (gone.Count > 0)
+                    await gallery.Store.MarkCommittedAsync(gone);
+                await LoadAsync();
+#endif
+                if (!SystemTrash)
+                    await Shell.Current.DisplayAlertAsync("Not everything was deleted",
+                        "You backed out of Android's folder screen, or a file couldn't be deleted. What's still " +
+                        "on your device stays in the bin: empty it again to finish, and allow access to the " +
+                        "folder Android opens on.", "OK");
+                return;
+            }
 
             await gallery.Store.MarkCommittedAsync(ids);
             gallery.Invalidate();

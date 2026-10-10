@@ -205,9 +205,9 @@ public static class MoveRouting
     }
 
     /// <summary>The volume of internal storage in a tree document id ("primary:DCIM").</summary>
-    private const string InternalStorageVolume = "primary";
+    internal const string InternalStorageVolume = "primary";
 
-    private static bool TrySplitDocumentId(string documentId, out string volume, out string path)
+    internal static bool TrySplitDocumentId(string documentId, out string volume, out string path)
     {
         int colon = documentId.IndexOf(':');
         volume = colon > 0 ? documentId[..colon] : "";
@@ -215,6 +215,6 @@ public static class MoveRouting
         return colon > 0;
     }
 
-    private static string[] Segments(string path) =>
+    internal static string[] Segments(string path) =>
         path.Split('/', StringSplitOptions.RemoveEmptyEntries);
 }
