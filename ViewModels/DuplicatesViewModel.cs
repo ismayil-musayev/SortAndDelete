@@ -304,10 +304,13 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
         if (_byLevel.Count == 0)
             return;
 
-        _ticks = [.. Groups.Select(card => new GroupTicks(
-            card.Items.First(item => item.IsKeeper).PhotoId,
-            [.. card.Items.Select(item => new ItemTick(item.PhotoId, item.Version, item.IsSelected))]))];
+        _ticks = [.. Groups.Select(TicksOf)];
     }
+
+    /// <summary>A group as it stands on screen: its copies as they were shown, and which are ticked.</summary>
+    private static GroupTicks TicksOf(DuplicateGroupCard card) => new(
+        card.Items.First(item => item.IsKeeper).PhotoId,
+        [.. card.Items.Select(item => new ItemTick(item.PhotoId, item.Version, item.IsSelected))]);
 
     /// <summary>
     /// Puts the chosen level's groups on screen. After a rescan or a regroup the ones that came
@@ -474,6 +477,16 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
         if (!confirmed || groupings != _groupings || _loads.IsRunning)
             return;
 
+        // No load ran, but the library may have changed all the same, with the screen up.
+        if (!await TicksStillHoldAsync(groupings))
+            return;
+
+        // That check can take as long as reading the library again, with the screen live meanwhile.
+        // If what is ticked is no longer what the user agreed to (a tick was changed, or another
+        // level is up), nothing is moved: the button now says what would go.
+        if (!Groups.SelectMany(g => g.Items).Where(i => i.IsSelected).SequenceEqual(selected))
+            return;
+
         var binned = new HashSet<string>(StringComparer.Ordinal);
         bool failed = false;
 
@@ -522,6 +535,81 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
 
         if (failed)
             await SayBinFailedAsync(binned.Count, selected.Count);
+    }
+
+    /// <summary>
+    /// Whether what is ticked can still go to the bin, checked against the library as it is now.
+    ///
+    /// The groups were found in one read of the library, and the screen looks again only on a
+    /// visit or when the app comes back. Another app can change the library with the screen up:
+    /// the gallery hears of that from its change watcher and reads the library again when next
+    /// asked, which is here. If it has, every copy of the groups something is ticked in must
+    /// still be there as it was shown (<see cref="TickedGroups"/>): with one gone or edited, the
+    /// copy ticked beside it may be the only one left. Then nothing is moved, and the groups are
+    /// found again, as on a visit.
+    /// </summary>
+    private async Task<bool> TicksStillHoldAsync(int groupings)
+    {
+        var copies = TickedGroups.Copies(Groups.Select(TicksOf));
+        var visit = _visit;
+
+        bool hold;
+        try
+        {
+            // The same instance for as long as the gallery hasn't read the library again. When it
+            // has to read it now, that takes a moment, and the button says why nothing has moved yet.
+            var reading = gallery.GetPhotosAsync();
+            if (!reading.IsCompleted)
+                BinButtonText = "Checking your library…";
+
+            var photos = await reading;
+            hold = ReferenceEquals(photos, _resultsFrom);
+            if (!hold)
+            {
+                var ids = copies.Select(copy => copy.PhotoId).ToHashSet(StringComparer.Ordinal);
+                var now = photos.Where(photo => ids.Contains(photo.Id))
+                    .ToDictionary(photo => photo.Id, StringComparer.Ordinal);
+
+                // iOS reports no sizes up front, and a copy was shown with its size looked up.
+                await gallery.EnsureSizesAsync(now.Values);
+                hold = TickedGroups.AreAsShown(copies, id => now.GetValueOrDefault(id));
+            }
+        }
+        catch (Exception)
+        {
+            hold = false; // the library can't be read, so nothing says they hold
+        }
+        finally
+        {
+            UpdateBinButton();
+        }
+
+        // A load that ran meanwhile has taken the groups over, as after the question.
+        if (groupings != _groupings || _loads.IsRunning)
+            return false;
+        if (hold)
+            return true;
+
+        // Never throws; a scan that fails says so on the page itself.
+        await LoadAsync(fromScratch: false, visit);
+        if (!visit.IsCancellationRequested && !ScanFailed)
+            await SayLibraryChangedAsync();
+        return false;
+    }
+
+    private static async Task SayLibraryChangedAsync()
+    {
+        try
+        {
+            await Shell.Current.DisplayAlertAsync("Checked again",
+                "Your library changed while these were on screen, and the copies you were about to act " +
+                "on could no longer be found just as they were shown. Nothing was moved to the bin. The " +
+                "duplicates have been checked again — have another look, then move them.", "OK");
+        }
+        catch (Exception)
+        {
+            // the page is gone with its window; nothing left to tell
+        }
     }
 
     private static async Task SayBinFailedAsync(int binned, int asked)

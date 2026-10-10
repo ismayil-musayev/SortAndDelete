@@ -167,6 +167,28 @@ public class VersionedLoadTests
         Assert.Equal("load 2", cache.Value);
     }
 
+    /// <summary>
+    /// What the bin counts on after a trash request that failed as a whole: the read that follows
+    /// its invalidation tells what the request still removed, so it must not be the value kept.
+    /// </summary>
+    [Fact]
+    public void An_invalidation_drops_the_value_kept_and_the_next_read_waits_for_a_new_load()
+    {
+        using var loads = new Loads();
+        var cache = new VersionedLoad<string>(loads.Load);
+        _ = cache.GetAsync();
+        loads.Finish(1);
+
+        cache.Invalidate();
+        var after = cache.GetAsync();
+
+        Assert.Null(cache.Value);
+        Assert.False(after.IsCompleted);
+        Assert.Equal(2, loads.Started);
+        loads.Finish(2);
+        Assert.Equal("load 2", ValueOf(after));
+    }
+
     [Fact]
     public void A_failed_load_throws_to_every_read_waiting_for_it_and_the_next_read_loads_again()
     {

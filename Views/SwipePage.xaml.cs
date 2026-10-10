@@ -48,7 +48,8 @@ public partial class SwipePage : ContentPage
 
     private async Task SwipeOutAsync(bool keep)
     {
-        if (_animating || _viewModel.CurrentPhoto is null)
+        // The card being acted on, taken now: the deck can be re-dealt while it flies out.
+        if (_animating || _viewModel.CurrentPhoto is not { } photo)
             return;
 
         _animating = true;
@@ -63,9 +64,9 @@ public partial class SwipePage : ContentPage
                 FrontCard.RotateToAsync(keep ? 18 : -18, 200, Easing.CubicIn));
 
             if (keep)
-                await _viewModel.KeepAsync();
+                await _viewModel.KeepAsync(photo);
             else
-                await _viewModel.TrashAsync();
+                await _viewModel.TrashAsync(photo);
 
             ResetCard();
         }

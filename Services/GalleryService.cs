@@ -44,7 +44,12 @@ public sealed class GalleryService(IPhotoLibraryService library, ReviewStore sto
     /// </summary>
     public async Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync() => (await _snapshot.GetAsync()).Albums;
 
-    /// <summary>Call after photos were deleted/moved outside the cache's knowledge.</summary>
+    /// <summary>
+    /// Call after photos were deleted/moved outside the cache's knowledge, also when the request
+    /// failed: it can have changed some. The lists kept are dropped, and a read that begins after
+    /// this waits for a load that began after it, so it sees what the change left (the bin counts
+    /// on that to tell what a failed request still removed).
+    /// </summary>
     public void Invalidate() => _snapshot.Invalidate();
 
     /// <summary>

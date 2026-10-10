@@ -123,6 +123,12 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
         try
         {
             var ok = await gallery.Library.RestoreFromSystemTrashAsync([item.PhotoId]);
+
+            // Whatever it reports, the library may have changed: Android's dialog can close without
+            // saying what it did (a rotation can do that), and the check afterwards can fail, so
+            // false doesn't mean nothing came back. The gallery reads the library again from here on.
+            gallery.Invalidate();
+
             // False: the user denied the system dialog, or Android didn't restore it (its dialog reports
             // success either way, so the service checks the gallery); it stays listed. True also when
             // nothing was left to restore (purged from the trash elsewhere, or on a card that isn't
@@ -133,7 +139,6 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
             await gallery.Store.RemoveAsync(item.PhotoId); // unreviewed again
             CommittedItems.Remove(item);
             HasCommitted = CommittedItems.Count > 0;
-            gallery.Invalidate();
         }
         finally
         {
@@ -164,8 +169,10 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
             var ids = Items.Select(i => i.PhotoId).ToList();
             var ok = await gallery.Library.MoveToSystemTrashAsync(ids);
 
-            // Android 10 deletes them one by one, each after its own consent, so some can be gone
-            // although the request as a whole failed.
+            // Whatever it reports, the library may have changed: a request that failed as a whole can
+            // still have trashed or deleted some of them (see below). So the list the gallery keeps is
+            // dropped here, before anything reads it again: every read from now on waits for a load
+            // that began after the request ended.
             gallery.Invalidate();
             if (!ok)
             {
@@ -179,10 +186,24 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
                 // deleted, or otherwise gone) is committed, and the rest stays in the bin. iOS: the user
                 // denied the dialog, so nothing left the library and nothing changes.
 #if ANDROID
-                var library = await gallery.GetPhotosAsync(refresh: true);
-                var gone = ids.Except(library.Select(p => p.Id)).ToList();
-                if (gone.Count > 0)
-                    await gallery.Store.MarkCommittedAsync(gone);
+                try
+                {
+                    // The library as the request left it: this read comes after the invalidation
+                    // above, so it never gets the list kept from before the request, which still has
+                    // every item and would leave the ones that went pending. Home finds this load
+                    // when it shows next.
+                    var library = await gallery.GetPhotosAsync();
+                    var gone = ids.Except(library.Select(p => p.Id)).ToList();
+                    if (gone.Count > 0)
+                        await gallery.Store.MarkCommittedAsync(gone);
+                }
+                catch (Exception)
+                {
+                    // The library can't be read just now, so nothing says what went. Everything stays
+                    // in the bin, and emptying it again sorts it out: a request asks only for what the
+                    // library still has. Left to escape the command, this would close the app right
+                    // after a delete.
+                }
                 await LoadAsync();
 #endif
                 if (!SystemTrash)

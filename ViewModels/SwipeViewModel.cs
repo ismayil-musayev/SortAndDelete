@@ -117,13 +117,15 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     /// <summary>Fresh queue load — used by init and by "Re-review month".</summary>
     private async Task LoadQueueAsync()
     {
-        _queue = await gallery.GetQueueAsync(Mode, MonthKey, Folder);
-        _total = Mode == DeckMode.Month
-            ? (await gallery.GetPhotosAsync(Folder)).Count(p => p.MonthKey == MonthKey)
-            : _queue.Count;
-
-        _history.Clear();
+        // The deck is read last, and from there to the cards nothing is awaited: the card on screen
+        // is always the front of the deck, which is the one a tap acts on.
+        int? monthTotal = await MonthTotalAsync();
         await RefreshBinBadgeAsync();
+        var queue = await gallery.GetQueueAsync(Mode, MonthKey, Folder);
+
+        _queue = queue;
+        _total = monthTotal ?? queue.Count;
+        _history.Clear();
         RefreshCards();
     }
 
@@ -133,19 +135,25 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
     /// </summary>
     private async Task ResyncAsync()
     {
+        // Read in the order LoadQueueAsync reads, for the same reason: the deck is dealt and shown
+        // in one go, so a restored photo is never at its front while the old card is still on screen.
+        // The Biggest deck keeps the total fixed from init; RefreshCards clamps if restores grow the queue.
+        int? monthTotal = await MonthTotalAsync();
+        await RefreshBinBadgeAsync();
         var fresh = await gallery.GetQueueAsync(Mode, MonthKey, Folder);
+
         var freshIds = fresh.Select(p => p.Id).ToHashSet();
         var knownIds = _queue.Select(p => p.Id).ToHashSet();
-
         _queue = [.. fresh.Where(p => !knownIds.Contains(p.Id)), .. _queue.Where(p => freshIds.Contains(p.Id))];
-
-        if (Mode == DeckMode.Month)
-            _total = (await gallery.GetPhotosAsync(Folder)).Count(p => p.MonthKey == MonthKey);
-        // The Biggest deck keeps the total fixed from init; RefreshCards clamps if restores grow the queue.
-
-        await RefreshBinBadgeAsync();
+        _total = monthTotal ?? _total;
         RefreshCards();
     }
+
+    /// <summary>How many items the deck's month has, reviewed or not; null for a deck that isn't a month's.</summary>
+    private async Task<int?> MonthTotalAsync() =>
+        Mode == DeckMode.Month
+            ? (await gallery.GetPhotosAsync(Folder)).Count(p => p.MonthKey == MonthKey)
+            : null;
 
     /// <summary>
     /// Forgets this month's Keep/Moved decisions and deals the deck again.
@@ -194,9 +202,22 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
         CanUndo = _history.Count > 0;
     }
 
-    public Task KeepAsync() => CurrentPhoto is { } photo ? DecideAsync(photo, SwipeDecision.Keep, album: null) : Task.CompletedTask;
+    /// <summary>Keeps <paramref name="photo"/>, the card the user acted on (see <see cref="DecideOnDeckAsync"/>).</summary>
+    public Task KeepAsync(PhotoAsset photo) => DecideOnDeckAsync(photo, SwipeDecision.Keep);
 
-    public Task TrashAsync() => CurrentPhoto is { } photo ? DecideAsync(photo, SwipeDecision.Trash, album: null) : Task.CompletedTask;
+    /// <summary>Sends <paramref name="photo"/>, the card the user acted on, to the bin (see <see cref="DecideOnDeckAsync"/>).</summary>
+    public Task TrashAsync(PhotoAsset photo) => DecideOnDeckAsync(photo, SwipeDecision.Trash);
+
+    /// <summary>
+    /// Decides about the card the user acted on, which the page hands over from before the card
+    /// flew out, rather than about whatever is at the front of the deck by then. Coming back from
+    /// the bin re-deals the deck once the library and the decisions are read, which takes a while
+    /// when the library has to be read again, and puts restored photos in front: a card swiped
+    /// meanwhile would otherwise send the photo just restored back to the bin in its place. A
+    /// photo the re-deal took off the deck is left alone.
+    /// </summary>
+    private Task DecideOnDeckAsync(PhotoAsset photo, SwipeDecision decision) =>
+        _queue.Any(p => p.Id == photo.Id) ? DecideAsync(photo, decision, album: null) : Task.CompletedTask;
 
     /// <summary>"Not sure yet" — pushes the photo to the end of the queue without a decision.</summary>
     public void Later()
@@ -353,9 +374,10 @@ public partial class SwipeViewModel(GalleryService gallery, IAlbumPickerService 
             await gallery.Store.RemoveAsync(photo.Id);
         }
 
+        // The badge first: the photo goes to the front of the deck and onto the screen in one go.
+        await RefreshBinBadgeAsync();
         _queue.RemoveAll(p => p.Id == photo.Id);
         _queue.Insert(0, photo);
-        await RefreshBinBadgeAsync();
         RefreshCards();
     }
 
