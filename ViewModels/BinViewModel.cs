@@ -39,7 +39,6 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
         IsLoading = true;
         try
         {
-            await gallery.GetPhotosAsync(); // warm the cache so thumbnails resolve
             var pending = await gallery.Store.GetPendingTrashAsync();
 
             Items.Clear();
@@ -164,6 +163,10 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
         {
             var ids = Items.Select(i => i.PhotoId).ToList();
             var ok = await gallery.Library.MoveToSystemTrashAsync(ids);
+
+            // Android 10 deletes them one by one, each after its own consent, so some can be gone
+            // although the request as a whole failed.
+            gallery.Invalidate();
             if (!ok)
             {
                 // Not every item went. Android 11+: the user denied the system dialog, Android didn't
@@ -191,7 +194,6 @@ public partial class BinViewModel(GalleryService gallery) : ObservableObject
             }
 
             await gallery.Store.MarkCommittedAsync(ids);
-            gallery.Invalidate();
             await LoadAsync();
 
 #if IOS

@@ -89,16 +89,26 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     // double as the re-entrancy guard.
     private bool _loadInProgress;
 
-    public async Task LoadAsync(bool refresh = false)
+    // Completes when the latest load has ended.
+    private Task _loadEnded = Task.CompletedTask;
+
+    // Whether the latest load's access request found the library usable. Set only there, so it
+    // is false until a load has asked; HasAccess starts true, for the page before any load.
+    private bool _accessGranted;
+
+    private async Task LoadAsync()
     {
         if (_loadInProgress)
             return;
 
         _loadInProgress = true;
+        var ended = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _loadEnded = ended.Task;
         IsLoading = true;
         try
         {
             HasAccess = await gallery.Library.RequestAccessAsync();
+            _accessGranted = HasAccess;
             IsLimitedAccess = HasAccess && await gallery.Library.HasLimitedAccessAsync();
             if (!HasAccess)
             {
@@ -106,7 +116,10 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
                 return;
             }
 
-            var groups = await gallery.GetMonthGroupsAsync(refresh, _selectedFolderId);
+            // The chips first: they settle which folder the totals and months are for.
+            await LoadFoldersAsync();
+
+            var groups = await gallery.GetMonthGroupsAsync(_selectedFolderId);
             var reviews = await gallery.Store.GetAllAsync();
             var pending = reviews.Where(r => r.Decision == SwipeDecision.Trash && r.CommittedAt == null).ToList();
             var freedBytes = await gallery.Store.GetFreedBytesAsync();
@@ -130,8 +143,6 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
                 ? $"🔥 {streak.StreakDays}-day streak · {streak.ReviewedToday} today"
                 : "";
 
-            await LoadFoldersAsync();
-
             // Same months in the same order → update rows in place so the
             // CollectionView keeps its scroll position when we come back here.
             bool sameShape = Months.Count == groups.Count;
@@ -148,9 +159,16 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
             }
             else
             {
+                // New rows keep the re-review selection of their month.
+                var selected = Months.Where(m => m.IsSelected).Select(m => m.MonthKey).ToHashSet();
                 Months.Clear();
                 foreach (var group in groups)
-                    Months.Add(new MonthCard(group, id => gallery.CreateThumbnail(id, 160)));
+                {
+                    Months.Add(new MonthCard(group, id => gallery.CreateThumbnail(id, 160))
+                    {
+                        IsSelected = selected.Contains(group.MonthKey),
+                    });
+                }
             }
 
             var lastKey = Preferences.Default.Get(LastMonthPreferenceKey, "");
@@ -158,43 +176,67 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         }
         finally
         {
-            _loadInProgress = false;
-            IsLoading = false;
+            try
+            {
+                _loadInProgress = false;
+                IsLoading = false;
+                UpdateSelectionState(); // the months under the re-review selection may have changed
+            }
+            finally
+            {
+                ended.SetResult(); // whatever happens, ReloadAsync must not wait forever
+            }
         }
     }
 
+    /// <summary>
+    /// Loads the page again after something it shows has changed: the library, the folder
+    /// selection, the review decisions. A load in progress may have read them before the change,
+    /// so this waits for it to end and then loads. Requests that waited for the same load end in
+    /// one load: the first to resume starts it, after all of their changes, and the others find
+    /// it running.
+    /// </summary>
+    public async Task ReloadAsync()
+    {
+        await _loadEnded;
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Loads the page again after the library changed outside it, in another app or while the app
+    /// was in the background: as <see cref="ReloadAsync"/> does, but only when the load in progress,
+    /// or else the latest one, found photo access. A load asks for access when there is none, and
+    /// a reload the user didn't ask for must not: after "Don't allow", a second "Don't allow" is
+    /// for good.
+    /// </summary>
+    public async Task ReloadAfterLibraryChangeAsync()
+    {
+        await _loadEnded;
+        if (!_accessGranted)
+            return;
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Rebuilds the folder chips and settles the selection: a selected folder without a chip
+    /// falls back to All.
+    /// </summary>
     private async Task LoadFoldersAsync()
     {
-        var albums = await gallery.Library.GetAlbumsAsync();
+        var albums = await gallery.GetAlbumsAsync();
         var photos = await gallery.GetPhotosAsync();
-        int favorites = photos.Count(p => p.IsFavorite);
+        var filter = FolderFilter.Build(albums, photos.Count(p => p.IsFavorite), _selectedFolderId);
 
+        _selectedFolderId = filter.SelectedFolderId;
         Folders.Clear();
-        var all = new FolderChip(null, "All folders") { IsSelected = _selectedFolderId is null };
-        Folders.Add(all);
-
-        // The one virtual album Android exposes system-wide; Samsung/Google
-        // gallery "Favourites" show up here.
-        if (favorites > 0)
-        {
-            Folders.Add(new FolderChip(GalleryService.FavoritesFolderId, $"⭐ Favourites · {favorites}")
-            {
-                IsSelected = _selectedFolderId == GalleryService.FavoritesFolderId,
-            });
-        }
-
-        foreach (var album in albums.Where(a => a.Count > 0))
-            Folders.Add(new FolderChip(album.Id, $"{album.Name} · {album.Count}") { IsSelected = album.Id == _selectedFolderId });
-
-        // Selected folder disappeared (e.g. emptied) → fall back to All.
-        if (_selectedFolderId is not null && !Folders.Any(f => f.IsSelected))
-        {
-            _selectedFolderId = null;
-            all.IsSelected = true;
-        }
+        foreach (var chip in filter.Chips)
+            Folders.Add(new FolderChip(chip.FolderId, chip.Label) { IsSelected = chip.IsSelected });
     }
 
-    [RelayCommand]
+    // An async command takes no tap while a run is pending, and a run waits for the load in
+    // progress, so a later tap would be lost. Each tap sets the selection, and the taps waiting
+    // for the same load share one load after it (see ReloadAsync).
+    [RelayCommand(AllowConcurrentExecutions = true)]
     private async Task SelectFolder(FolderChip? chip)
     {
         if (chip is null)
@@ -204,14 +246,20 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         foreach (var folder in Folders)
             folder.IsSelected = ReferenceEquals(folder, chip);
 
-        await LoadAsync();
+        await ReloadAsync();
     }
 
     [RelayCommand]
     private Task Refresh()
     {
+        // RefreshView runs this command whenever IsRefreshing turns true, so also when a load
+        // sets IsLoading through the two-way binding. Only a pull, with no load running, makes
+        // the gallery read the library again.
+        if (_loadInProgress)
+            return Task.CompletedTask;
+
         gallery.Invalidate();
-        return LoadAsync(refresh: true);
+        return LoadAsync();
     }
 
     [RelayCommand]
@@ -294,7 +342,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
             await gallery.Store.ClearKeepDecisionsForMonthAsync(month.MonthKey);
 
         CancelSelection();
-        await LoadAsync();
+        await ReloadAsync();
     }
 
     [RelayCommand]
@@ -318,7 +366,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
     {
         HasAccess = await gallery.Library.SelectMorePhotosAsync();
         gallery.Invalidate();
-        await LoadAsync(refresh: true);
+        await ReloadAsync();
     }
 
     [RelayCommand]
@@ -328,7 +376,7 @@ public partial class HomeViewModel(GalleryService gallery) : ObservableObject
         // otherwise send them to the system settings page for the app.
         HasAccess = await gallery.Library.RequestAccessAsync();
         if (HasAccess)
-            await LoadAsync();
+            await ReloadAsync();
         else
             AppInfo.Current.ShowSettingsUI();
     }

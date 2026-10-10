@@ -94,7 +94,10 @@ public interface IPhotoLibraryService
     /// </summary>
     Task<IReadOnlyCollection<string>> GetAlbumMemberIdsAsync(string folderId);
 
-    /// <summary>Existing albums/folders in the library (the folder filter, and the source of move targets).</summary>
+    /// <summary>
+    /// Existing albums/folders in the library: the source of move targets, and of the folder filter
+    /// on iOS (on Android the filter counts its folders from the photos).
+    /// </summary>
     Task<IReadOnlyList<AlbumInfo>> GetAlbumsAsync();
 
     /// <summary>

@@ -29,6 +29,14 @@ public static class MauiProgram
 		builder.Services.AddSingleton<IPhotoLibraryService, IosPhotoLibraryService>();
 #endif
 
+		// Changes made to the library while the app is in the foreground. iOS has no watcher yet: a
+		// PHPhotoLibraryChangeObserver could plug in here, registered in Start and unregistered in Stop.
+#if ANDROID
+		builder.Services.AddSingleton<ILibraryChangeWatcher, AndroidLibraryChangeWatcher>();
+#else
+		builder.Services.AddSingleton<ILibraryChangeWatcher, NoLibraryChangeWatcher>();
+#endif
+
 		// Shared services
 		builder.Services.AddSingleton(_ =>
 			new ReviewStore(Path.Combine(FileSystem.AppDataDirectory, "sortanddelete.db3")));

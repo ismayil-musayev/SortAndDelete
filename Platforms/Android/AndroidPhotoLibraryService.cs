@@ -677,7 +677,8 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
     {
         // Aggregate folders by relative path in C# — MediaStore has no portable GROUP BY,
         // and bucket display names collide between e.g. Pictures/Travel and DCIM/Travel.
-        var byPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Spellings that differ only in case are one folder, counted under the first one met.
+        var byPath = new Dictionary<string, int>(FolderFilter.IdComparer);
 
         string[] projection = [MediaStore.Images.Media.InterfaceConsts.RelativePath];
 
@@ -697,43 +698,50 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
         }
 
         // MediaStore only knows folders through the media inside them — brand-new/empty
-        // folders are invisible to it, so also walk the real directory tree.
-        foreach (var root in new[]
-                 {
-                     global::Android.OS.Environment.DirectoryPictures,
-                     global::Android.OS.Environment.DirectoryDcim,
-                     global::Android.OS.Environment.DirectoryMovies,
-                 })
-        {
-            if (root is null)
-                continue;
-            try
-            {
-                var rootDir = global::Android.OS.Environment.GetExternalStoragePublicDirectory(root)?.AbsolutePath;
-                if (rootDir is not null && Directory.Exists(rootDir))
-                    CollectSubdirectories(rootDir, $"{root}/", depth: 2, byPath);
-            }
-            catch
-            {
-                // directory browsing can be restricted on some devices — MediaStore data still works
-            }
-        }
+        // folders are invisible to it, so also walk the real directory tree. Listing a folder on
+        // shared storage visits every file in it, so what the walk finds is kept while the app is
+        // in the foreground (see AndroidFolderWalkCache).
+        foreach (var folder in AndroidFolderWalkCache.Shared.Folders(WalkFolders))
+            byPath.TryAdd(folder, 0);
 
-        var albums = byPath
-            .Select(kv => new AlbumInfo
-            {
-                Id = kv.Key,
-                Name = kv.Key.TrimEnd('/').Split('/').Last(),
-                Count = kv.Value,
-                Subtitle = kv.Key,
-            })
-            .OrderBy(a => a.Name, StringComparer.CurrentCultureIgnoreCase)
-            .ThenBy(a => a.Id, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        // Items at the top of the storage ("/") show as "Main storage", listed first.
+        var albums = FolderFilter.InDisplayOrder(byPath.Select(kv => new AlbumInfo
+        {
+            Id = kv.Key,
+            Name = FolderFilter.NameFor(kv.Key),
+            Count = kv.Value,
+            Subtitle = kv.Key,
+        }));
 
         // Folders the user picked with the system browser (anywhere on the device).
         albums.AddRange(GetSavedSafAlbums());
         return albums;
+
+        static IReadOnlyList<string> WalkFolders()
+        {
+            var found = new Dictionary<string, int>(FolderFilter.IdComparer);
+            foreach (var root in new[]
+                     {
+                         global::Android.OS.Environment.DirectoryPictures,
+                         global::Android.OS.Environment.DirectoryDcim,
+                         global::Android.OS.Environment.DirectoryMovies,
+                     })
+            {
+                if (root is null)
+                    continue;
+                try
+                {
+                    var rootDir = global::Android.OS.Environment.GetExternalStoragePublicDirectory(root)?.AbsolutePath;
+                    if (rootDir is not null && Directory.Exists(rootDir))
+                        CollectSubdirectories(rootDir, $"{root}/", depth: 2, found);
+                }
+                catch
+                {
+                    // directory browsing can be restricted on some devices — MediaStore data still works
+                }
+            }
+            return [.. found.Keys];
+        }
     });
 
     private static void CollectSubdirectories(string dir, string relativePrefix, int depth, Dictionary<string, int> byPath)
