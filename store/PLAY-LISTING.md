@@ -82,8 +82,9 @@ sharing location, personal info, digital purchases). Result: rated for everyone 
 **Data safety**:
 - Does your app collect or share any of the required user data types? → **No**
 - Result shown to users: "No data collected · No data shared"
-- Since 3.0 the app also holds `ACCESS_MEDIA_LOCATION`: it reads a photo's location
-  only so that a copy made during a move keeps it, on the device. "Collected" in Play's
+- Since 3.0 the app also holds `ACCESS_MEDIA_LOCATION`: it reads photos as unaltered
+  originals, location included, so that a copy made during a move keeps it and identical
+  files can be compared byte for byte, all on the device. "Collected" in Play's
   sense means sent off the device, and the app has no network access, so the answer
   stays **No**. If Play raises a question about the permission after upload, that is
   the use to state.
@@ -108,11 +109,11 @@ Version 3.0 · versionCode 3
 ```
 Duplicates
 
-Finds the same photo even when the files are nothing alike — your camera original and the copy that came back over WhatsApp or Bluetooth.
+Finds the same photo even when the files are nothing alike — your camera original and the copy that came back over WhatsApp or Bluetooth. Five levels, from byte-for-byte certain to loosely similar. Videos too.
 
-Five levels, from byte-for-byte certain to loosely similar, each showing what it would find. Videos too. Nothing leaves your gallery until you empty the bin.
+Also new: Home loads faster and follows changes made by other apps. SD card photos move and delete properly. Moved photos keep their location, date and ⭐.
 
-Fixes: moving to folders that used to fail, moved photos keep their location, date and ⭐, the photo picker no longer asks twice, and a crash when reopening the app.
+Fixes: a tap can't decide a photo before it appears, moves into folders that used to fail, and a crash on reopening.
 ```
 
 ---

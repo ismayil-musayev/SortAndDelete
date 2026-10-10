@@ -52,7 +52,9 @@ blobs — WhatsApp re-encodes and resizes, so its copy shares no bytes with the 
 Two tiers, and the first is always on:
 
 1. **Exact copies** — byte-identical files. Only items that already share a byte length get
-   hashed, since nothing else can possibly match, which keeps this nearly free.
+   hashed, since nothing else can possibly match, which keeps this nearly free. Files are
+   compared as unaltered originals, location included, so two copies that differ only in
+   where they were taken are not called identical.
 2. **The same picture** — matched on what it looks like rather than what it contains, so
    resolution, compression and stripped metadata stop mattering.
 
@@ -73,6 +75,11 @@ fingerprints, so it is instant and never rescans.
 Only the levels worth standing behind arrive with anything ticked; the looser ones surface
 groups and leave every choice to you. Each level shows what it would actually find — *"312
 items · 1.4 GB"* — so the choice is made on consequences rather than on adjectives.
+
+Even at "Same photo", a look-alike of the very same pixel size is grouped but left unticked.
+A fingerprint is taken from a thumbnail 32 pixels across, and at that scale one form with
+different values, or two slides, are the same picture. Resized copies and identical files
+still arrive ticked.
 
 ### Why two hashes
 
