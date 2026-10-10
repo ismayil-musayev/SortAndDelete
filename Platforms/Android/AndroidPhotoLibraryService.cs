@@ -150,6 +150,11 @@ public sealed class AndroidPhotoLibraryService : IPhotoLibraryService
                 Id = id,
                 Kind = isVideo ? MediaKind.Video : MediaKind.Image,
                 TakenAt = DateTimeOffset.FromUnixTimeMilliseconds(takenMs).ToLocalTime().DateTime,
+
+                // Clamped: a writer can leave nonsense in DATE_MODIFIED, and one row out of
+                // DateTime's range mustn't stop the whole library loading.
+                FileModifiedAt = DateTimeOffset.FromUnixTimeSeconds(
+                    Math.Clamp(cursor.GetLong(modifiedCol), 0, DateTimeOffset.MaxValue.ToUnixTimeSeconds())).UtcDateTime,
                 SizeBytes = cursor.GetLong(sizeCol),
                 Width = cursor.GetInt(widthCol),
                 Height = cursor.GetInt(heightCol),

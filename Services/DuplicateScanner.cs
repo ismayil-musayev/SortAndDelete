@@ -47,7 +47,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
         var sizeCollisions = ItemsSharingAByteLength(photos);
 
         var signatures = new Dictionary<string, ImageSignature>(StringComparer.Ordinal);
-        var frames = new Dictionary<string, List<ImageSignature>>(StringComparer.Ordinal);
+        var frames = new Dictionary<string, IReadOnlyList<ImageSignature?>>(StringComparer.Ordinal);
 
         // Reuse whatever is still valid before deciding what is left to do.
         var stillsToRead = new List<PhotoAsset>();
@@ -59,31 +59,49 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
                 stillsToRead.Add(photo);
         }
 
-        var videosToRead = new List<PhotoAsset>();
+        // A clip's frames are slots, one per sample position, null where nothing current is
+        // cached. A clip missing a frame reads only that one, not the whole clip over again.
+        var videosToRead = new List<(PhotoAsset Video, ImageSignature?[] Known)>();
+        int framesToRead = 0;
         foreach (var video in photos.Where(p => p.Kind == MediaKind.Video && samplable.Contains(p.Id)))
         {
-            var sampled = new List<ImageSignature>();
-            for (int frame = 0; frame < VideoFingerprint.SamplePositions.Length; frame++)
-            {
-                if (Cached(cached, video, frame) is { } signature)
-                    sampled.Add(signature);
-                else
-                    break;
-            }
+            var known = new ImageSignature?[VideoFingerprint.SamplePositions.Length];
+            for (int frame = 0; frame < known.Length; frame++)
+                known[frame] = Cached(cached, video, frame);
 
-            if (sampled.Count == VideoFingerprint.SamplePositions.Length)
-                frames[video.Id] = sampled;
+            int missing = known.Count(slot => slot is null);
+            if (missing == 0)
+            {
+                frames[video.Id] = known;
+            }
             else
-                videosToRead.Add(video);
+            {
+                videosToRead.Add((video, known));
+                framesToRead += missing;
+            }
+        }
+
+        // Hashes cached before files carried a stamp. One that could make an identical pair is
+        // read again, as its file may have been rotated since; dropped here, it is hashed below
+        // and doesn't count if that fails. The rest keep their value and take the file's stamp.
+        var adoption = HashAdoption.For(sizeCollisions, contentHashes);
+        foreach (var photo in adoption.Reread)
+            contentHashes.Remove(photo.Id);
+
+        try
+        {
+            await store.SaveContentHashesAsync(adoption.Adopted);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            // only an optimisation: the rows stay unstamped, and are adopted again next scan
         }
 
         var toHash = sizeCollisions
-            .Where(p => !(contentHashes.TryGetValue(p.Id, out var row) && row.SizeBytes == p.SizeBytes))
+            .Where(p => !(contentHashes.TryGetValue(p.Id, out var row) && row.IsCurrentFor(p)))
             .ToList();
 
-        int total = stillsToRead.Count
-            + (videosToRead.Count * VideoFingerprint.SamplePositions.Length)
-            + toHash.Count;
+        int total = stillsToRead.Count + framesToRead + toHash.Count;
         int done = 0;
 
         if (total == 0)
@@ -109,26 +127,29 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             await AdvanceAsync("Fingerprinting photos");
         });
 
-        await RunAsync(videosToRead, Concurrency, ct, async video =>
+        await RunAsync(videosToRead, Concurrency, ct, async clip =>
         {
-            var sampled = new List<ImageSignature>();
-            for (int frame = 0; frame < VideoFingerprint.SamplePositions.Length; frame++)
+            var (video, known) = clip;
+
+            // Only the empty slots are read, which is what framesToRead counted.
+            var sampled = await VideoFingerprint.SampleAsync(known, async frame =>
             {
                 var pixels = await library.GetVideoFramePixelsAsync(
                     video.Id, VideoFingerprint.SamplePositions[frame], SignatureBuilder.GridSize, ct);
 
+                ImageSignature? signature = null;
                 if (pixels is { Length: SignatureBuilder.ExpectedLength })
                 {
-                    var signature = SignatureBuilder.Build(pixels);
-                    sampled.Add(signature);
+                    signature = SignatureBuilder.Build(pixels);
                     lock (signatures)
                         pending.Add(SignatureRecord.From(video.Id, frame, video, signature));
                 }
 
                 await AdvanceAsync("Sampling videos");
-            }
+                return signature;
+            });
 
-            if (sampled.Count > 0)
+            if (sampled.Any(slot => slot is not null))
             {
                 lock (signatures)
                     frames[video.Id] = sampled;
@@ -141,7 +162,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             var hash = await library.ComputeContentHashAsync(photo.Id, ct);
             if (hash is not null)
             {
-                var record = new ContentHashRecord { PhotoId = photo.Id, SizeBytes = photo.SizeBytes, Hash = hash };
+                var record = ContentHashRecord.From(photo, hash);
                 lock (freshHashes)
                 {
                     freshHashes.Add(record);
@@ -151,8 +172,19 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             await AdvanceAsync("Checking for identical files");
         });
 
-        await FlushAsync(force: true);
-        await store.SaveContentHashesAsync(freshHashes);
+        // Stopping keeps what was read, so the next scan picks up from there. A save failing on
+        // the way out mustn't turn the stop into an error.
+        try
+        {
+            await FlushAsync(force: true);
+            await store.SaveContentHashesAsync(freshHashes);
+        }
+        catch (Exception) when (ct.IsCancellationRequested)
+        {
+            // stopping anyway; what didn't save is read again next time
+        }
+
+        ct.ThrowIfCancellationRequested();
         await store.ForgetMissingAsync(photos.Select(p => p.Id).ToHashSet(StringComparer.Ordinal));
 
         return Assemble(photos, signatures, frames, contentHashes);
@@ -219,10 +251,12 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
     /// <summary>
     /// Items sharing an exact byte length with another. Byte-identical files must land here,
     /// so hashing this set alone finds every exact duplicate without reading the whole library.
+    /// Edited items are left out: they can never be an identical file, and as iOS won't hash
+    /// them they would come up again on every scan, which would then never be up to date.
     /// </summary>
     private static List<PhotoAsset> ItemsSharingAByteLength(IReadOnlyList<PhotoAsset> photos) =>
         [.. photos
-            .Where(p => p.SizeBytes > 0)
+            .Where(p => p.SizeBytes > 0 && !p.IsEdited)
             .GroupBy(p => p.SizeBytes)
             .Where(group => group.Count() > 1)
             .SelectMany(group => group)];
@@ -230,7 +264,7 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
     private static List<ScannedPhoto> Assemble(
         IReadOnlyList<PhotoAsset> photos,
         Dictionary<string, ImageSignature> signatures,
-        Dictionary<string, List<ImageSignature>> frames,
+        Dictionary<string, IReadOnlyList<ImageSignature?>> frames,
         Dictionary<string, ContentHashRecord> contentHashes) =>
         [.. photos.Select(photo => new ScannedPhoto
         {
@@ -238,41 +272,63 @@ public sealed class DuplicateScanner(IPhotoLibraryService library, SignatureStor
             Signature = signatures.GetValueOrDefault(photo.Id),
             Frames = frames.GetValueOrDefault(photo.Id),
 
-            // A hash from a different file length describes a file that has since changed.
-            ContentHash = contentHashes.TryGetValue(photo.Id, out var row) && row.SizeBytes == photo.SizeBytes
+            // A hash from a different file length describes a file that has since changed, and an
+            // edited item's describes an original it no longer looks like. Its row is kept, so
+            // reverting the edit costs no second read.
+            ContentHash = !photo.IsEdited
+                && contentHashes.TryGetValue(photo.Id, out var row)
+                && row.IsCurrentFor(photo)
                 ? row.Hash
                 : null,
         })];
 
+    /// <summary>
+    /// Runs <paramref name="work"/> over the items, <paramref name="concurrency"/> workers each
+    /// taking the next until none are left or the scan is stopped. Stopped, it returns once the
+    /// items under way have finished instead of throwing: the scan still saves what was read,
+    /// then throws itself. Workers, not a task per item waiting its turn, which a stop would
+    /// wake one by one on the UI thread just to throw.
+    /// </summary>
     private static async Task RunAsync<T>(
         IReadOnlyList<T> items, int concurrency, CancellationToken ct, Func<T, Task> work)
     {
         if (items.Count == 0)
             return;
 
-        using var gate = new SemaphoreSlim(concurrency);
-        var running = items.Select(async item =>
+        int next = -1;
+        var workers = Enumerable.Range(0, Math.Min(concurrency, items.Count)).Select(async _ =>
         {
-            await gate.WaitAsync(ct);
             try
             {
-                await work(item);
+                while (!ct.IsCancellationRequested)
+                {
+                    int index = Interlocked.Increment(ref next);
+                    if (index >= items.Count)
+                        return;
+
+                    try
+                    {
+                        await work(items[index]);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        // The scan was stopped. Any other cancellation is one more unreadable
+                        // item, below.
+                        throw;
+                    }
+                    catch
+                    {
+                        // One unreadable item must not take the scan down with it; it simply ends up
+                        // without a fingerprint and never matches anything.
+                    }
+                }
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                throw;
-            }
-            catch
-            {
-                // One unreadable item must not take the scan down with it; it simply ends up
-                // without a fingerprint and never matches anything.
-            }
-            finally
-            {
-                gate.Release();
+                // stopped; see above
             }
         });
 
-        await Task.WhenAll(running);
+        await Task.WhenAll(workers);
     }
 }

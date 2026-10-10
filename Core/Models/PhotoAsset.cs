@@ -17,6 +17,38 @@ public sealed class PhotoAsset
     /// <summary>Local time the item was taken (falls back to file time when EXIF is absent).</summary>
     public DateTime TakenAt { get; init; }
 
+    /// <summary>
+    /// The platform's last-modification time, in UTC (iOS PHAsset.modificationDate), filled
+    /// where an edit can leave the size and capture date unchanged. It also moves on
+    /// metadata-only changes such as favouriting. Android leaves it unset and relies on size
+    /// and capture date, as before. <see cref="DateTime.MinValue"/>, the default, means not
+    /// tracked.
+    /// </summary>
+    public DateTime ModifiedAt { get; init; }
+
+    /// <summary>
+    /// When the bytes of the item's own file last changed, in UTC, where the platform can change
+    /// them in place: Android (MediaStore DATE_MODIFIED) rewrites the file for an edit such as a
+    /// rotation, which can keep its size. Android always fills it, a DATE_MODIFIED of 0 or NULL
+    /// as 1970, which still compares like any other stamp. Unset on iOS, where the original is
+    /// never rewritten and an edit is saved beside it (<see cref="IsEdited"/>).
+    /// <see cref="DateTime.MinValue"/>, the default, means not tracked.
+    /// </summary>
+    /// <remarks>
+    /// Only the content hash checks it. A fingerprint goes by <see cref="ModifiedAt"/>, which
+    /// Android leaves unset: a stale one still shows the right picture, at worst turned the old
+    /// way, and checking this as well would re-fingerprint every Android library.
+    /// </remarks>
+    public DateTime FileModifiedAt { get; init; }
+
+    /// <summary>
+    /// True when an edit is kept beside the untouched original (iOS PHAsset.hasAdjustments), so
+    /// the original's bytes no longer show what the item looks like and it can never be an
+    /// identical file of anything. Always false on Android, where an edit rewrites the file
+    /// itself.
+    /// </summary>
+    public bool IsEdited { get; init; }
+
     /// <summary>File size in bytes. 0 when unknown (iOS defers the lookup); settable so it can be filled lazily.</summary>
     public long SizeBytes { get; set; }
 

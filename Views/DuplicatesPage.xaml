@@ -71,9 +71,9 @@
         </Border>
 
         <!-- ===== Groups ===== -->
-        <!-- Hidden while scanning: the groups are empty then, so the empty view would sit under the progress panel. -->
+        <!-- Hidden while scanning or after a failed scan: the groups are empty then, so the empty view would sit under the panel. -->
         <CollectionView Grid.Row="3" ItemsSource="{Binding Groups}" SelectionMode="None" Margin="12,8"
-                        IsVisible="{Binding IsScanning, Converter={StaticResource InvertedBool}}">
+                        IsVisible="{Binding ShowsResults}">
             <CollectionView.ItemTemplate>
                 <DataTemplate x:DataType="vm:DuplicateGroupCard">
                     <Border BackgroundColor="{StaticResource Surface}" Margin="0,0,0,10"
@@ -126,6 +126,16 @@
                                                             <Label Text="KEEP" FontSize="9" FontAttributes="Bold"
                                                                    TextColor="White" />
                                                         </Border>
+
+                                                        <!-- Edited (iOS): never ticked by the app -->
+                                                        <Border IsVisible="{Binding IsEdited}"
+                                                                BackgroundColor="{StaticResource SurfaceAlt}"
+                                                                StrokeThickness="0" StrokeShape="RoundRectangle 7"
+                                                                Padding="6,2" Margin="5"
+                                                                HorizontalOptions="End" VerticalOptions="Start">
+                                                            <Label Text="EDITED" FontSize="9" FontAttributes="Bold"
+                                                                   TextColor="{StaticResource TextPrimary}" />
+                                                        </Border>
                                                     </Grid>
                                                 </Border>
                                                 <Label Text="{Binding DimensionsText}" FontSize="10"
@@ -168,9 +178,18 @@
                          BackgroundColor="{StaticResource Surface}" />
             <Label Text="{Binding ScanStatus}" FontSize="12"
                    TextColor="{StaticResource TextSecondary}" HorizontalTextAlignment="Center" />
-            <Label Text="This runs once. After that, opening this screen and switching between levels is instant."
+            <Label Text="The first scan reads everything; later ones only what's new or changed. You can leave at any time — it picks up where it stopped."
                    FontSize="12" TextColor="{StaticResource TextSecondary}"
                    HorizontalTextAlignment="Center" />
+        </VerticalStackLayout>
+
+        <!-- ===== Scan failed: said outright, not left looking as if nothing was found ===== -->
+        <VerticalStackLayout Grid.Row="3" IsVisible="{Binding ScanFailed}" Spacing="14"
+                             Padding="40" VerticalOptions="Center">
+            <Label Text="The scan didn't finish" FontSize="16" FontAttributes="Bold"
+                   TextColor="{StaticResource TextPrimary}" HorizontalOptions="Center" />
+            <Label Text="{Binding ScanStatus}" FontSize="12"
+                   TextColor="{StaticResource TextSecondary}" HorizontalTextAlignment="Center" />
         </VerticalStackLayout>
 
         <!-- ===== Actions ===== -->

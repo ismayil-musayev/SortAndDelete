@@ -40,7 +40,8 @@ public class DuplicateGrouperTests
         string takenAt = "2026-07-01T12:00:00",
         string folder = "DCIM/Camera/",
         MediaKind kind = MediaKind.Image,
-        long durationMs = 0) => new()
+        long durationMs = 0,
+        bool edited = false) => new()
     {
         Id = id,
         SizeBytes = size,
@@ -51,6 +52,7 @@ public class DuplicateGrouperTests
         FileName = $"{id}.jpg",
         Kind = kind,
         DurationMs = durationMs,
+        IsEdited = edited,
     };
 
     private static ScannedPhoto Scanned(PhotoAsset photo, ImageSignature? signature = null, string? contentHash = null) =>
@@ -94,6 +96,46 @@ public class DuplicateGrouperTests
         ];
 
         Assert.Empty(DuplicateGrouper.Group(items, DuplicateLevel.Exact));
+    }
+
+    /// <summary>
+    /// An iOS edit leaves the original's bytes alone, so the edited photo can still carry the
+    /// hash it had as a byte-identical copy. It no longer looks like those bytes.
+    /// </summary>
+    [Theory]
+    [InlineData(DuplicateLevel.Exact)]
+    [InlineData(DuplicateLevel.SamePhoto)]
+    [InlineData(DuplicateLevel.Adjusted)]
+    [InlineData(DuplicateLevel.SameMoment)]
+    [InlineData(DuplicateLevel.Similar)]
+    public void An_edited_photo_is_never_an_identical_file(DuplicateLevel level)
+    {
+        List<ScannedPhoto> items =
+        [
+            Scanned(Photo("original"), contentHash: "abc"),
+            Scanned(Photo("edited", edited: true), contentHash: "abc"),
+        ];
+
+        Assert.Empty(DuplicateGrouper.Group(items, level));
+    }
+
+    /// <summary>
+    /// The edit can still look close enough to its original for a perceptual level, but that
+    /// group is a lookalike, not identical files, whatever the stale hash says.
+    /// </summary>
+    [Fact]
+    public void A_group_holding_an_edited_photo_is_never_exact()
+    {
+        List<ScannedPhoto> items =
+        [
+            Scanned(Photo("original"), Signature(0b0000), contentHash: "abc"),
+            Scanned(Photo("edited", edited: true), Signature(0b0001), contentHash: "abc"),
+        ];
+
+        var group = Assert.Single(DuplicateGrouper.Group(items, DuplicateLevel.SamePhoto));
+
+        Assert.Equal(2, group.Items.Count);
+        Assert.False(group.IsExact);
     }
 
     // ---------- Same photo, re-encoded ----------

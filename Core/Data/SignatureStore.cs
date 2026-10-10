@@ -21,12 +21,36 @@ public sealed class SignatureStore
             SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create | SQLiteOpenFlags.SharedCache);
     }
 
-    private Task InitAsync() => _init ??= InitCoreAsync();
+    private Task InitAsync()
+    {
+        // Opening writes now (the migration), so a failure such as a full disk is retried, not kept.
+        if (_init is { IsFaulted: true })
+            _init = null;
+        return _init ??= InitCoreAsync();
+    }
 
     private async Task InitCoreAsync()
     {
+        // Also the migration: a column a record has gained is added to the existing table. Old
+        // rows hold NULL in it, which sqlite-net reads back as 0. It can't be [NotNull]: SQLite
+        // won't add a NOT NULL column without a default.
         await _db.CreateTableAsync<SignatureRecord>();
         await _db.CreateTableAsync<ContentHashRecord>();
+    }
+
+    /// <summary>
+    /// Closes the database and lets go of its file, which sqlite-net otherwise keeps open for
+    /// the life of the process. The next call opens it again.
+    /// </summary>
+    /// <remarks>
+    /// Here for the tests, which delete the file when they are done. The app never calls it: its
+    /// store stays open for the life of the process. It must not be called while other calls are
+    /// in flight, which would find the connection closed under them.
+    /// </remarks>
+    public async Task CloseAsync()
+    {
+        _init = null;
+        await _db.CloseAsync();
     }
 
     /// <summary>Every cached fingerprint, grouped by photo and ordered by frame.</summary>

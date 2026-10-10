@@ -1,3 +1,4 @@
+using SQLite;
 using SortAndDelete.Models;
 using SortAndDelete.Services;
 using Xunit;
@@ -5,23 +6,20 @@ using Xunit;
 namespace SortAndDelete.Tests;
 
 /// <summary>Exercises the real SQLite store against a temp database file.</summary>
-public sealed class ReviewStoreTests : IDisposable
+public sealed class ReviewStoreTests : IAsyncLifetime
 {
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"sortanddelete_test_{Guid.NewGuid():N}.db3");
     private readonly ReviewStore _store;
 
     public ReviewStoreTests() => _store = new ReviewStore(_dbPath);
 
-    public void Dispose()
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    public async Task DisposeAsync()
     {
-        try
-        {
-            File.Delete(_dbPath);
-        }
-        catch
-        {
-            // temp file cleanup is best-effort (connection may still hold it briefly)
-        }
+        // Closed first: sqlite-net keeps the connection pooled, and the file with it.
+        await _store.CloseAsync();
+        File.Delete(_dbPath);
     }
 
     private static ReviewRecord Trash(string id, long size = 0) => new()
@@ -142,5 +140,42 @@ public sealed class ReviewStoreTests : IDisposable
         Assert.Equal(2, cleared); // kept + moved only
         var remaining = (await _store.GetAllAsync()).Select(r => r.PhotoId).Order().ToList();
         Assert.Equal(["binned", "other_month"], remaining);
+    }
+
+    /// <summary>
+    /// Opening creates the table, so something like a full disk can make it fail. That mustn't
+    /// stick for the life of the app, failing every decision made from then on: the next call
+    /// has to try again.
+    /// </summary>
+    [Fact]
+    public async Task A_store_that_failed_to_open_tries_again_on_the_next_call()
+    {
+        // Stands in for a full disk: SQLite can't open a folder as its file.
+        Directory.CreateDirectory(_dbPath);
+
+        await Assert.ThrowsAsync<SQLiteException>(() => _store.UpsertAsync(Trash("p1")));
+
+        Directory.Delete(_dbPath);
+        await _store.UpsertAsync(Trash("p1"));
+        Assert.Equal("p1", Assert.Single(await _store.GetAllAsync()).PhotoId);
+    }
+
+    /// <summary>
+    /// Closing lets go of the file, and the store opens it again when next needed, with what it
+    /// held. Should the file have gone meanwhile, it starts a new one.
+    /// </summary>
+    [Fact]
+    public async Task A_closed_store_opens_again_on_the_next_call()
+    {
+        await _store.UpsertAsync(Trash("p1"));
+
+        await _store.CloseAsync();
+
+        Assert.Equal("p1", Assert.Single(await _store.GetAllAsync()).PhotoId);
+
+        await _store.CloseAsync();
+        File.Delete(_dbPath); // Windows refuses this while a connection still holds the file
+
+        Assert.Empty(await _store.GetAllAsync());
     }
 }
