@@ -25,6 +25,12 @@ public partial class DuplicateItem : ObservableObject
     /// <summary>Carries an edit (iOS), so the app never ticks it for the bin by itself.</summary>
     public bool IsEdited { get; init; }
 
+    /// <summary>
+    /// The photo as it was when this went on screen. A rescan that finds it changed doesn't
+    /// carry the tick over.
+    /// </summary>
+    public required PhotoVersion Version { get; init; }
+
     [ObservableProperty] private bool isSelected;
 }
 
@@ -67,8 +73,8 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
     private IReadOnlyList<ScannedPhoto> _scanned = [];
     private DuplicateLevel _level = DuplicateLevel.SamePhoto;
 
-    /// <summary>The load under way, if any. Only one runs at a time.</summary>
-    private Task _load = Task.CompletedTask;
+    /// <summary>Lets one load run at a time.</summary>
+    private readonly LoadGate _loads = new();
 
     /// <summary>The visit the page is on now, which ↻ scans under.</summary>
     private CancellationToken _visit;
@@ -87,6 +93,13 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
     /// started on them can tell.
     /// </summary>
     private int _groupings;
+
+    /// <summary>
+    /// What was ticked in the groups last on screen at this level, noted as they were replaced or
+    /// thrown away so that the ones that come back unchanged get it back. Null once that is done,
+    /// and after a change of level, which starts from the level's own ticks.
+    /// </summary>
+    private IReadOnlyList<GroupTicks>? _ticks;
 
     public ObservableCollection<LevelChip> Levels { get; } =
     [
@@ -134,29 +147,19 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
         return LoadAsync(fromScratch: false, visit);
     }
 
-    private async Task LoadAsync(bool fromScratch, CancellationToken visit)
-    {
-        // One load at a time. One still running may be an ended visit's, saving what it read, or
-        // this visit's own: wait it out and look again, unless this visit has ended meanwhile.
-        while (!_load.IsCompleted)
-            await _load;
-
-        if (visit.IsCancellationRequested)
-            return;
-
-        _load = RefreshAsync(fromScratch, visit);
-        await _load;
-    }
+    // One load at a time, and none for a visit that ended while it waited its turn.
+    private Task LoadAsync(bool fromScratch, CancellationToken visit) =>
+        _loads.RunAsync(() => RefreshAsync(fromScratch, visit), visit);
 
     /// <summary>
     /// Scans, unless the groups on screen still hold. Never throws: it runs under
-    /// <c>OnAppearing</c>, an <c>async void</c> that would take the app down with it, so a
-    /// failure ends up on the page instead.
+    /// <c>OnAppearing</c> and the window's <c>Resumed</c>, each an <c>async void</c> that would
+    /// take the app down with it, so a failure ends up on the page instead.
     /// </summary>
     private async Task RefreshAsync(bool fromScratch, CancellationToken ct)
     {
         // Groups worth keeping stay up while they're checked; with none, the scan shows at once.
-        bool checking = !fromScratch && _resultsFrom is not null;
+        bool checking = LoadDecision.ChecksFirst(_resultsFrom, fromScratch);
         try
         {
             if (!checking)
@@ -168,28 +171,21 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
             var photos = await gallery.GetPhotosAsync();
             var binned = await GetBinnedAsync();
 
-            if (checking)
+            switch (LoadDecision.For(_resultsFrom, _resultsBinned, photos, binned, fromScratch, IsBusy))
             {
-                // Moving items to the bin re-derives the groups itself; the next visit catches up.
-                if (IsBusy)
+                case LoadAction.Keep:
                     return;
 
-                // The same list, so not reloaded since, and nothing has left the bin: the groups
-                // hold, less whatever went to the bin from elsewhere meanwhile, which a regroup
-                // takes out. Something restored needs a scan, as the last one left it out.
-                if (ReferenceEquals(photos, _resultsFrom) && binned.IsSupersetOf(_resultsBinned))
-                {
-                    if (binned.Count > _resultsBinned.Count)
-                    {
-                        _scanned = [.. _scanned.Where(s => !binned.Contains(s.Photo.Id))];
-                        _resultsBinned = binned;
-                        await RegroupAsync();
-                    }
+                // Whatever went to the bin from elsewhere meanwhile comes out of the groups.
+                case LoadAction.Regroup:
+                    _scanned = [.. _scanned.Where(s => !binned.Contains(s.Photo.Id))];
+                    _resultsBinned = binned;
+                    await RegroupAsync();
                     return;
-                }
-
-                BeginScan();
             }
+
+            if (checking)
+                BeginScan();
 
             ct.ThrowIfCancellationRequested();
 
@@ -248,7 +244,7 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
     /// <summary>
     /// Works out every level's groups from <see cref="_scanned"/> and shows the chosen one. All
     /// five up front, off the UI thread, so the counts are real and switching level costs
-    /// nothing afterwards.
+    /// nothing afterwards. The groups that come back as they were keep what was ticked in them.
     /// </summary>
     private async Task RegroupAsync()
     {
@@ -256,6 +252,7 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
             AllLevels.ToDictionary(level => level, level => DuplicateGrouper.Group(_scanned, level)));
 
         _groupings++;
+        NoteTicks();
         _byLevel.Clear();
         foreach (var (level, groups) in grouped)
             _byLevel[level] = groups;
@@ -269,7 +266,7 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
                 : $"{redundant:N0} · {ByteFormat.Human(groups.Sum(g => g.ReclaimableBytes))}";
         }
 
-        Render();
+        Render(carryTicks: true);
     }
 
     /// <summary>
@@ -279,6 +276,7 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
     private void DiscardResults()
     {
         _groupings++;
+        NoteTicks();
         _resultsFrom = null;
         _scanned = [];
         _byLevel.Clear();
@@ -297,14 +295,36 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
             .Select(r => r.PhotoId)
             .ToHashSet(StringComparer.Ordinal);
 
-    private void Render()
+    /// <summary>
+    /// Notes what is ticked in the groups on screen, which are about to go. With none up there
+    /// is nothing to note, and what was noted before a scan that then failed still stands.
+    /// </summary>
+    private void NoteTicks()
+    {
+        if (_byLevel.Count == 0)
+            return;
+
+        _ticks = [.. Groups.Select(card => new GroupTicks(
+            card.Items.First(item => item.IsKeeper).PhotoId,
+            [.. card.Items.Select(item => new ItemTick(item.PhotoId, item.Version, item.IsSelected))]))];
+    }
+
+    /// <summary>
+    /// Puts the chosen level's groups on screen. After a rescan or a regroup the ones that came
+    /// back as they were keep their ticks (<see cref="TickCarryOver"/>); a change of level
+    /// starts from the level's own, as it always has.
+    /// </summary>
+    private void Render(bool carryTicks = false)
     {
         var rules = DuplicateRules.For(_level);
         var groups = _byLevel.GetValueOrDefault(_level) ?? [];
 
+        var ticks = TickCarryOver.Apply(carryTicks ? _ticks : null, groups, rules.PreselectsKeeper);
+        _ticks = null;
+
         Groups.Clear();
-        foreach (var group in groups)
-            Groups.Add(BuildCard(group, rules.PreselectsKeeper));
+        for (int i = 0; i < groups.Count; i++)
+            Groups.Add(BuildCard(groups[i], ticks[i]));
 
         HasGroups = Groups.Count > 0;
         LevelHint = HintFor(_level);
@@ -320,12 +340,14 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
         UpdateBinButton();
     }
 
-    private DuplicateGroupCard BuildCard(DuplicateGroup group, bool preselect)
+    private DuplicateGroupCard BuildCard(DuplicateGroup group, GroupTicks ticks)
     {
         var items = new ObservableCollection<DuplicateItem>();
 
-        foreach (var photo in group.Items)
+        for (int i = 0; i < group.Items.Count; i++)
         {
+            var photo = group.Items[i];
+            var tick = ticks.Items[i];
             bool isKeeper = photo.Id == group.Keeper.Id;
             var item = new DuplicateItem
             {
@@ -338,12 +360,8 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
                 SizeBytes = photo.SizeBytes,
                 IsKeeper = isKeeper,
                 IsEdited = photo.IsEdited,
-
-                // Only the levels we can stand behind arrive with anything ticked. The looser
-                // ones surface the group and leave every choice to the user. An edited item never
-                // does: ranking can't tell it from its original, so which of the two would go
-                // comes down to their ids.
-                IsSelected = preselect && !isKeeper && !photo.IsEdited,
+                Version = tick.Version,
+                IsSelected = tick.IsTicked,
             };
             item.PropertyChanged += (_, args) =>
             {
@@ -453,35 +471,72 @@ public partial class DuplicatesViewModel(GalleryService gallery, DuplicateScanne
 
         // A load that ran while the question was up has replaced these groups or thrown them
         // away, or may yet, so what was ticked can no longer be taken for what it looked like.
-        if (!confirmed || groupings != _groupings || !_load.IsCompleted)
+        if (!confirmed || groupings != _groupings || _loads.IsRunning)
             return;
+
+        var binned = new HashSet<string>(StringComparer.Ordinal);
+        bool failed = false;
 
         IsBusy = true;
         try
         {
-            foreach (var item in selected)
+            try
             {
-                await gallery.Store.UpsertAsync(new ReviewRecord
+                foreach (var item in selected)
                 {
-                    PhotoId = item.PhotoId,
-                    MonthKey = item.MonthKey,
-                    Decision = SwipeDecision.Trash,
-                    DecidedAt = DateTime.UtcNow,
-                    SizeBytes = item.SizeBytes,
-                });
+                    await gallery.Store.UpsertAsync(new ReviewRecord
+                    {
+                        PhotoId = item.PhotoId,
+                        MonthKey = item.MonthKey,
+                        Decision = SwipeDecision.Trash,
+                        DecidedAt = DateTime.UtcNow,
+                        SizeBytes = item.SizeBytes,
+                    });
+                    binned.Add(item.PhotoId);
+                }
             }
-
-            // Those items are spoken for now, so drop them and re-derive the groups from
-            // what is left — a group of two that loses one is no longer a group.
-            var binned = selected.Select(i => i.PhotoId).ToHashSet(StringComparer.Ordinal);
-            _scanned = [.. _scanned.Where(s => !binned.Contains(s.Photo.Id))];
-            _resultsBinned.UnionWith(binned);
-            await RegroupAsync();
+            finally
+            {
+                // Those items are spoken for now, so drop them and re-derive the groups from
+                // what is left — a group of two that loses one is no longer a group. Only the
+                // ones that reached the bin, when a write failed part of the way: the rest stay
+                // where they were, still ticked in any group that is whole.
+                if (binned.Count > 0)
+                {
+                    _scanned = [.. _scanned.Where(s => !binned.Contains(s.Photo.Id))];
+                    _resultsBinned.UnionWith(binned);
+                    await RegroupAsync();
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // Say, a full disk. Left to escape the command, it would take the app down.
+            failed = true;
         }
         finally
         {
             IsBusy = false;
             UpdateBinButton();
+        }
+
+        if (failed)
+            await SayBinFailedAsync(binned.Count, selected.Count);
+    }
+
+    private static async Task SayBinFailedAsync(int binned, int asked)
+    {
+        string message = binned == 0
+            ? "Something went wrong and nothing was moved to the bin. Your gallery is untouched — try again."
+            : $"Something went wrong after {binned:N0} of {asked:N0} items reached the bin. " +
+              "The rest are still here, and nothing has left your gallery — try again.";
+        try
+        {
+            await Shell.Current.DisplayAlertAsync("Couldn't move to bin", message, "OK");
+        }
+        catch (Exception)
+        {
+            // the page is gone with its window; nothing left to tell
         }
     }
 }

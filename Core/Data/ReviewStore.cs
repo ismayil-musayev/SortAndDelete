@@ -15,7 +15,28 @@ public sealed class ReviewStore
             SQLiteOpenFlags.ReadWrite | SQLiteOpenFlags.Create | SQLiteOpenFlags.SharedCache);
     }
 
-    private Task InitAsync() => _init ??= _db.CreateTableAsync<ReviewRecord>();
+    private Task InitAsync()
+    {
+        // Opening creates the table, so a failure such as a full disk is retried, not kept.
+        if (_init is { IsFaulted: true })
+            _init = null;
+        return _init ??= _db.CreateTableAsync<ReviewRecord>();
+    }
+
+    /// <summary>
+    /// Closes the database and lets go of its file, which sqlite-net otherwise keeps open for
+    /// the life of the process. The next call opens it again.
+    /// </summary>
+    /// <remarks>
+    /// Here for the tests, which delete the file when they are done. The app never calls it: its
+    /// store stays open for the life of the process. It must not be called while other calls are
+    /// in flight, which would find the connection closed under them.
+    /// </remarks>
+    public async Task CloseAsync()
+    {
+        _init = null;
+        await _db.CloseAsync();
+    }
 
     public async Task<List<ReviewRecord>> GetAllAsync()
     {

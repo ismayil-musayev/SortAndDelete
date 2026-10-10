@@ -80,6 +80,46 @@ public class HashAdoptionTests
     }
 
     /// <summary>
+    /// Two hashes claiming a pair say nothing about the other files of their length. Those
+    /// can't make a pair with anything, so they keep their hashes and cost no read.
+    /// </summary>
+    [Fact]
+    public void Only_the_hashes_claiming_a_pair_are_read_again_and_the_rest_of_their_length_adopted()
+    {
+        var adoption = Adopt(
+            [File("1"), File("2"), File("3"), File("4")],
+            Unstamped("1", "ABC"), Unstamped("2", "ABC"), Unstamped("3", "DEF"), Unstamped("4", "GHI"));
+
+        Assert.Equal(["1", "2"], Ids(adoption.Reread));
+        Assert.Equal(["3", "4"], Ids(adoption.Adopted));
+        Assert.Equal(["DEF", "GHI"], adoption.Adopted.Select(row => row.Hash).Order());
+        Assert.All(adoption.Adopted, row => Assert.Equal(Written.Ticks, row.FileModifiedAtTicks));
+    }
+
+    /// <summary>
+    /// The same beside a stamped twin: the unstamped one of the pair is read, and a third hash
+    /// of the length is adopted. A pair of stamped hashes puts nothing in doubt at all.
+    /// </summary>
+    [Fact]
+    public void A_third_hash_is_adopted_beside_a_pair_whether_the_pair_is_stamped_or_not()
+    {
+        var first = File("1");
+        var second = File("2");
+
+        var halfStamped = Adopt(
+            [first, second, File("3")],
+            ContentHashRecord.From(first, "ABC"), Unstamped("2", "ABC"), Unstamped("3", "DEF"));
+        var stamped = Adopt(
+            [first, second, File("3")],
+            ContentHashRecord.From(first, "ABC"), ContentHashRecord.From(second, "ABC"), Unstamped("3", "DEF"));
+
+        Assert.Equal(["2"], Ids(halfStamped.Reread));
+        Assert.Equal(["3"], Ids(halfStamped.Adopted));
+        Assert.Empty(stamped.Reread);
+        Assert.Equal(["3"], Ids(stamped.Adopted));
+    }
+
+    /// <summary>
     /// A file of the same length read anyway, one new since the last scan or one whose hash is
     /// stale, could turn out to be what an unstamped hash describes, perhaps from before a
     /// rotation, so that hash is read again too. Other lengths aren't affected.
@@ -99,6 +139,21 @@ public class HashAdoptionTests
 
         Assert.Equal(["1", "3"], Ids(adoption.Reread));
         Assert.Equal(["5"], Ids(adoption.Adopted));
+    }
+
+    /// <summary>
+    /// That holds for every unstamped hash of the length, not only the ones claiming a pair
+    /// already: the file being read could turn out to match any of them.
+    /// </summary>
+    [Fact]
+    public void A_file_being_read_puts_a_hash_nothing_shares_in_doubt_too()
+    {
+        var adoption = Adopt(
+            [File("1"), File("2"), File("3"), File("4")], // 4 has no hash yet
+            Unstamped("1", "ABC"), Unstamped("2", "ABC"), Unstamped("3", "DEF"));
+
+        Assert.Equal(["1", "2", "3"], Ids(adoption.Reread));
+        Assert.Empty(adoption.Adopted);
     }
 
     /// <summary>

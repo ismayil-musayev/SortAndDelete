@@ -6,7 +6,7 @@ using Xunit;
 namespace SortAndDelete.Tests;
 
 /// <summary>Exercises the real fingerprint cache against a temp database file.</summary>
-public sealed class SignatureStoreTests : IDisposable
+public sealed class SignatureStoreTests : IAsyncLifetime
 {
     private static readonly DateTime Taken = new(2026, 7, 1, 12, 0, 0);
 
@@ -14,17 +14,22 @@ public sealed class SignatureStoreTests : IDisposable
     private static readonly DateTime Written = new(2026, 7, 1, 12, 0, 5, DateTimeKind.Utc);
 
     private readonly string _dbPath = Path.Combine(Path.GetTempPath(), $"sortanddelete_test_{Guid.NewGuid():N}.db3");
+    private SignatureStore? _store;
 
-    public void Dispose()
+    /// <summary>
+    /// The cache under test. A test opens it once whatever it needs on disk first is there, as
+    /// the store reads the file on its first call.
+    /// </summary>
+    private SignatureStore Open() => _store ??= new SignatureStore(_dbPath);
+
+    public Task InitializeAsync() => Task.CompletedTask;
+
+    public async Task DisposeAsync()
     {
-        try
-        {
-            File.Delete(_dbPath);
-        }
-        catch
-        {
-            // best-effort: sqlite-net's pooled connection holds the file until the test run ends
-        }
+        // Closed first: sqlite-net keeps the connection pooled, and the file with it.
+        if (_store is not null)
+            await _store.CloseAsync();
+        File.Delete(_dbPath);
     }
 
     /// <summary><see cref="SignatureRecord"/> as Android 3.0 shipped it, before the modification time.</summary>
@@ -125,7 +130,7 @@ public sealed class SignatureStoreTests : IDisposable
     public async Task Rows_cached_before_the_upgrade_stay_current_for_an_untracked_photo()
     {
         CreateCacheAs30LeftIt();
-        var store = new SignatureStore(_dbPath);
+        var store = Open();
 
         var signature = Assert.Single((await store.GetSignaturesAsync())["42"]);
 
@@ -145,7 +150,7 @@ public sealed class SignatureStoreTests : IDisposable
     public async Task Hashes_cached_before_the_upgrade_read_back_unstamped_and_current()
     {
         CreateCacheAs30LeftIt();
-        var store = new SignatureStore(_dbPath);
+        var store = Open();
 
         var hash = (await store.GetContentHashesAsync())["42"];
 
@@ -163,7 +168,7 @@ public sealed class SignatureStoreTests : IDisposable
     public async Task An_upgraded_cache_keeps_the_stamp_of_new_hashes()
     {
         CreateCacheAs30LeftIt();
-        var store = new SignatureStore(_dbPath);
+        var store = Open();
         var stamped = Photo(fileModifiedAt: Written);
 
         await store.SaveContentHashesAsync([ContentHashRecord.From(stamped, "DEF")]);
@@ -179,7 +184,7 @@ public sealed class SignatureStoreTests : IDisposable
     public async Task An_upgraded_cache_keeps_the_modification_time_of_new_fingerprints()
     {
         CreateCacheAs30LeftIt();
-        var store = new SignatureStore(_dbPath);
+        var store = Open();
         var tracked = Photo(modifiedAt: new DateTime(2026, 8, 15, 9, 30, 0, DateTimeKind.Utc));
 
         await store.SaveSignaturesAsync([SignatureRecord.From("42", 0, tracked, Signature())]);
@@ -198,11 +203,32 @@ public sealed class SignatureStoreTests : IDisposable
     {
         // Stands in for a full disk: SQLite can't open a folder as its file.
         Directory.CreateDirectory(_dbPath);
-        var store = new SignatureStore(_dbPath);
+        var store = Open();
 
         await Assert.ThrowsAsync<SQLiteException>(() => store.GetSignaturesAsync());
 
         Directory.Delete(_dbPath);
+        Assert.Empty(await store.GetSignaturesAsync());
+    }
+
+    /// <summary>
+    /// Closing lets go of the file, and the cache opens it again when next needed, with what it
+    /// held. Should the file have gone meanwhile, it starts a new one.
+    /// </summary>
+    [Fact]
+    public async Task A_closed_cache_opens_again_on_the_next_call()
+    {
+        var store = Open();
+        await store.SaveContentHashesAsync([ContentHashRecord.From(Photo(), "ABC")]);
+
+        await store.CloseAsync();
+
+        Assert.Equal("ABC", (await store.GetContentHashesAsync())["42"].Hash);
+
+        await store.CloseAsync();
+        File.Delete(_dbPath); // Windows refuses this while a connection still holds the file
+
+        Assert.Empty(await store.GetContentHashesAsync());
         Assert.Empty(await store.GetSignaturesAsync());
     }
 }

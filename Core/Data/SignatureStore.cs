@@ -38,6 +38,21 @@ public sealed class SignatureStore
         await _db.CreateTableAsync<ContentHashRecord>();
     }
 
+    /// <summary>
+    /// Closes the database and lets go of its file, which sqlite-net otherwise keeps open for
+    /// the life of the process. The next call opens it again.
+    /// </summary>
+    /// <remarks>
+    /// Here for the tests, which delete the file when they are done. The app never calls it: its
+    /// store stays open for the life of the process. It must not be called while other calls are
+    /// in flight, which would find the connection closed under them.
+    /// </remarks>
+    public async Task CloseAsync()
+    {
+        _init = null;
+        await _db.CloseAsync();
+    }
+
     /// <summary>Every cached fingerprint, grouped by photo and ordered by frame.</summary>
     public async Task<Dictionary<string, List<SignatureRecord>>> GetSignaturesAsync()
     {
